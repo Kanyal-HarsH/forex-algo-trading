@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from config.constants import PURGE_ROWS, HORIZON_SECONDARY
+from config.constants import PURGE_ROWS, HORIZON_SECONDARY, DEFAULT_N_FOLDS
 
 assert PURGE_ROWS >= HORIZON_SECONDARY, (
     f"PURGE_ROWS ({PURGE_ROWS}) must be >= HORIZON_SECONDARY ({HORIZON_SECONDARY}) "
@@ -36,8 +36,6 @@ REQUIRED_COLUMNS = [
 
 DEFAULT_TRAIN_END   = "2021-12-31 23:59:59+00:00"
 DEFAULT_VAL_END     = "2023-12-31 23:59:59+00:00"
-DEFAULT_PURGE_ROWS  = 15
-DEFAULT_N_FOLDS     = 5
 FOLD_FIRST_VAL_YEAR = 2019
 
 
@@ -80,7 +78,7 @@ def parse_args() -> argparse.Namespace:
                         help="End of the fixed training window.")
     parser.add_argument("--val-end",     type=str, default=DEFAULT_VAL_END,
                         help="End of the fixed validation window.")
-    parser.add_argument("--purge-rows",  type=int, default=DEFAULT_PURGE_ROWS,
+    parser.add_argument("--purge-rows",  type=int, default=PURGE_ROWS,
                         help="Rows purged from every train tail before the next window.")
     parser.add_argument("--n-folds",     type=int, default=DEFAULT_N_FOLDS,
                         help="Number of walk-forward folds (default 5).")
@@ -334,7 +332,7 @@ def process_folds(
 
         print(
             f"  [fold {fold}] {pair}: "
-            f"train ≤ {train_end.year}  ({len(train_df):,} rows)  "
+            f"train <= {train_end.year}  ({len(train_df):,} rows)  "
             f"val {val_start.year}  ({len(val_df):,} rows)  "
             f"purge={purge_rows}"
         )
@@ -372,7 +370,7 @@ def main() -> None:
         full_df = load_labeled_pair(pair)
         print(
             f"  Loaded {len(full_df):,} rows  "
-            f"({full_df['timestamp_utc'].min().date()} → "
+            f"({full_df['timestamp_utc'].min().date()} -> "
             f"{full_df['timestamp_utc'].max().date()})"
         )
 
@@ -396,14 +394,14 @@ def main() -> None:
     fold_manifest = pd.DataFrame(fold_rows)
     save_csv(fold_manifest, REPORTS_DIR / "fold_manifest.csv")
 
-    print(f"\n{'═'*60}")
+    print(f"\n{'='*60}")
     print("SPLIT COMPLETE")
-    print(f"{'═'*60}")
+    print(f"{'='*60}")
     print(f"Fixed split  ->  {TRAIN_DIR.parent}")
     print(f"Folds        ->  {FOLDS_DIR}")
     print(f"Reports      ->  {REPORTS_DIR}")
 
-    print("\n── Fixed split manifest ──")
+    print("\n-- Fixed split manifest --")
     preview_cols = [
         "pair", "total_rows",
         "train_rows", "val_rows", "test_rows",
@@ -416,7 +414,7 @@ def main() -> None:
     )
 
     if not fold_manifest.empty:
-        print("\n── Fold manifest (first 10 rows) ──")
+        print("\n-- Fold manifest (first 10 rows) --")
         fold_preview = [
             "pair", "fold",
             "train_rows", "train_end",

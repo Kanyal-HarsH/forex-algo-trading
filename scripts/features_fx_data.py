@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from config.constants import VOL_HIGH_REGIME_PERCENTILE
+from config.constants import VOL_HIGH_REGIME_PERCENTILE, VOL_REGIME_WINDOW
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
@@ -41,8 +41,6 @@ RANGE_MA_WINDOWS = [10, 30]
 
 OVERLAP_START_HOUR = 13
 OVERLAP_END_HOUR = 16
-
-VOL_REGIME_WINDOW = 30
 
 
 def ensure_dir(path: Path) -> Path:

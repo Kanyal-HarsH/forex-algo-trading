@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from backtest.strategies import STRATEGY_REGISTRY, get_strategy
+from config.constants import ANNUALISATION_FACTOR, ROLLING_SHARPE_WINDOW
 
 PAIRS: list[str] = [
     "EURUSD", "GBPUSD", "USDJPY", "USDCHF",
@@ -92,7 +93,7 @@ class BacktestResult:
         }
 
 
-def _sharpe(returns: np.ndarray, periods_per_year: int = 252 * 390) -> float:
+def _sharpe(returns: np.ndarray, periods_per_year: int = ANNUALISATION_FACTOR) -> float:
     if len(returns) < 2:
         return 0.0
     std = returns.std()
@@ -101,7 +102,7 @@ def _sharpe(returns: np.ndarray, periods_per_year: int = 252 * 390) -> float:
     return float(returns.mean() / std * np.sqrt(periods_per_year))
 
 
-def _sortino(returns: np.ndarray, periods_per_year: int = 252 * 390) -> float:
+def _sortino(returns: np.ndarray, periods_per_year: int = ANNUALISATION_FACTOR) -> float:
     downside = returns[returns < 0]
     if len(downside) < 2:
         return 0.0
@@ -119,7 +120,7 @@ def _max_drawdown(equity: np.ndarray) -> float:
     return float(dd.min())
 
 
-def _rolling_sharpe(returns: np.ndarray, window: int = 390) -> list[float]:
+def _rolling_sharpe(returns: np.ndarray, window: int = ROLLING_SHARPE_WINDOW) -> list[float]:
     out = []
     for i in range(len(returns)):
         w = returns[max(0, i - window + 1): i + 1]
@@ -321,7 +322,7 @@ def run_backtest(
         "Flat":  int(sig_counts.get(0, 0)),
     }
 
-    roll_sh = _rolling_sharpe(ret_arr, window=390)
+    roll_sh = _rolling_sharpe(ret_arr)
     ts_list = list(timestamps) if timestamps else []
 
     return BacktestResult(
