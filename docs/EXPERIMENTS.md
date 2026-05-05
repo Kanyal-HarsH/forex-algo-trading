@@ -11,20 +11,28 @@ Reproducibility is treated as a research question in its own right rather than a
 
 The master evaluation script is deterministic given a fixed configuration. Running `scripts/master_eval.py` with the same `--pairs`, `--eval-year`, `--spreads`, and on-disk model checkpoints produces diff-equal output CSVs and text reports across runs. This determinism is the operational form of RQ0 and is implicitly tested by every per-stage regression test in the suite.
 
-Output artefacts land in `output/master_eval/` and consist of one text report (`master_report.txt`) plus seven structured CSVs. `results_all.csv` combines rule-based and ML results sorted by composite score. `results_rule_based.csv` and `results_ml.csv` contain the per-class breakdowns. `best_worst_per_pair.csv` summarises per-pair extremes. `dm_test_results.csv` reports the four Diebold-Mariano comparisons per pair. `session_generalisability.csv` summarises the in-domain-versus-transfer pattern across pairs. Per-pair transfer matrices (4 by 4 Sharpe matrices for LR and LSTM) live in `transfer_matrix_lr_{PAIR}.csv` and `transfer_matrix_lstm_{PAIR}.csv`. The eighth file, `cost_breakeven.csv`, reports the spread-multiplier breakpoint at which each strategy's net return falls to zero.
+Output artefacts land in a per-run subdirectory under `output/master_eval/run_<window>/`, where `<window>` is a slug derived from the eval window (`1day`, `1week`, `1month`, `6month`, `12month`, `24month`). A pointer file `output/master_eval/latest_run.txt` records the most recent subdirectory. Each subdirectory contains one text report (`master_report.txt`) plus a CSV suite of ten distinct families. `results_all.csv` combines rule-based and ML results sorted by composite score. `results_rule_based.csv` and `results_ml.csv` contain the per-class breakdowns. `best_worst_per_pair.csv` summarises per-pair extremes. `dm_test_results.csv` reports the four Diebold-Mariano comparisons per pair. `session_generalisability.csv` summarises the in-domain-versus-transfer pattern across training sessions. `lr_feature_importance.csv` lists the top-five features per (pair, session) cell. Per-pair transfer matrices (4 by 4 Sharpe matrices for LR and LSTM) live in `transfer_matrix_lr_{PAIR}.csv` and `transfer_matrix_lstm_{PAIR}.csv`. The remaining file, `cost_breakeven.csv`, reports the spread-multiplier breakpoint at which each strategy's net return falls to zero (populates only when at least two `--spreads` values are supplied).
+
+A figure gallery regenerates from the same per-run directory. Run `python scripts/make_report_plots.py` to read `latest_run.txt` and write 33 publication-grade figures plus a `TABLES.md` index to `docs/assets/plots/run_<window>/`. The headline numbers from the most recent end-to-end run are summarised in [FINDINGS.md](FINDINGS.md).
 
 
 ## Experiment catalogue
 
 | Experiment ID | Hypothesis | Variables | Controlled | Status |
 |---------------|------------|-----------|------------|--------|
-| RQ0 | Identical inputs (seeds, splits, code, environment) produce identical evaluation outputs | none (precondition) | seeds, splits, code, environment | ongoing precondition; verified by per-stage regression tests |
-| RQ1 | Session-conditional models achieve higher cost-adjusted Sharpe than a single global model | session conditioning (4 levels: global, london, ny, asia) | data, splits, costs, scoring, model class | data ready; awaiting full LSTM grid |
-| RQ2 | A multi-scale LSTM with two branches outperforms Logistic Regression under identical evaluation conditions | model class (LR vs LSTM) | data, splits, costs, scoring, session conditioning | data ready; awaiting full LSTM grid |
+| RQ0 | Identical inputs (seeds, splits, code, environment) produce identical evaluation outputs | none (precondition) | seeds, splits, code, environment | answered yes; verified by per-stage regression tests and an empty `diff` on `results_all.csv` across re-runs |
+| RQ1 | Session-conditional models achieve higher cost-adjusted Sharpe than a single global model | session conditioning (4 levels: global, london, ny, asia) | data, splits, costs, scoring, model class | answered: mixed and pair-specific (2 of 14 in-domain DM probes significant). Detail in [FINDINGS.md](FINDINGS.md) |
+| RQ2 | A multi-scale LSTM with two branches outperforms Logistic Regression under identical evaluation conditions | model class (LR vs LSTM) | data, splits, costs, scoring, session conditioning | answered: no on aggregate (LR avg Sharpe -7.90, LSTM avg Sharpe -6.43, no DM champion-vs-runner-up below `p = 0.19`). Detail in [FINDINGS.md](FINDINGS.md) |
 
-The status column reflects the gating constraint for each experiment. RQ0 is ongoing in the sense that every change to the codebase is implicitly an RQ0 test: if the change introduces non-determinism, the regression suite catches it. RQ1 and RQ2 are gated on completing the LSTM grid, since both require comparing 28 cells against 28 cells (seven pairs by four sessions for each model class).
+RQ0 is ongoing in the sense that every change to the codebase is implicitly an RQ0 test: if the change introduces non-determinism, the regression suite catches it. RQ1 and RQ2 each require comparing 28 cells against 28 cells (seven pairs by four sessions for each model class); the full grid is in place on disk and the master evaluation has been run end-to-end across six windows from one trading day up to the full 24-month test span.
 
-The full LSTM grid contains 28 cells (7 pairs × 4 conditions). The four-person research team is incrementally training cells; the master evaluation reports any missing cell as `NaN` rather than silently skipping it, so partial-grid runs remain interpretable.
+The full ML grid is 56 trained checkpoints: 28 Logistic Regression plus 28 multi-scale LSTM. Inventory:
+
+```bash
+ls models/global/ ; ls models/session/london/ ; ls models/session/ny/ ; ls models/session/asia/
+```
+
+Each subdirectory contains seven `*_logreg_model.pkl` files and seven `*_lstm_model.pt` files. The master evaluation reports any missing cell as `NaN` rather than silently skipping it, so a partial-grid run remains interpretable.
 
 
 ## Running experiments
@@ -39,16 +47,19 @@ Expected runtime: 35 to 50 minutes on a recent laptop. Output structure:
 
 ```
 output/master_eval/
-├── master_report.txt              definitive text report
-├── results_all.csv                all backtest rows, sorted by composite
-├── results_rule_based.csv         T1-T5 breakdown
-├── results_ml.csv                 ML cross-session breakdown
-├── best_worst_per_pair.csv        per-pair extremes
-├── transfer_matrix_lr_EURUSD.csv  one per pair
-├── transfer_matrix_lstm_EURUSD.csv
-├── session_generalisability.csv
-├── dm_test_results.csv
-└── cost_breakeven.csv
+├── latest_run.txt                       pointer to the most recent run subdir
+└── run_<window>/                        per-run output (e.g. run_1day, run_24month)
+    ├── master_report.txt                definitive text report; read this first
+    ├── results_all.csv                  all backtest rows, sorted by composite score
+    ├── results_rule_based.csv           T1-to-T5 breakdown
+    ├── results_ml.csv                   ML cross-session breakdown
+    ├── best_worst_per_pair.csv          per-pair extremes
+    ├── transfer_matrix_lr_EURUSD.csv    one per pair (LR), 7 files total
+    ├── transfer_matrix_lstm_EURUSD.csv  one per pair (LSTM), 7 files total
+    ├── session_generalisability.csv     avg off-diagonal Sharpe per training session
+    ├── lr_feature_importance.csv        top-5 features per (pair, session) cell
+    ├── dm_test_results.csv              4 DM comparisons per pair
+    └── cost_breakeven.csv               populated only with >=2 spread multipliers
 ```
 
 The full-window evaluation (the entire test split, 2024 to 2025, all pairs, all spreads) takes longer and is appropriate for the final research run:
@@ -83,6 +94,14 @@ python scripts/master_eval.py --from 2024-06-01 --to 2024-12-31 --spreads 1.0
 
 The script validates that any custom date window lies inside the locked test span (`TEST_START` to `TEST_END` in `config/constants.py`) and refuses anything outside.
 
+To run all six standard evaluation windows in a single orchestrator call:
+
+```bash
+python scripts/run_all_windows.py --workers 8
+```
+
+The orchestrator dispatches `master_eval.py` for the 1-day, 1-week, 1-month, 6-month, 12-month, and 24-month windows in sequence, each into its own `output/master_eval/run_<window>/` subdirectory. Subsequent calls regenerate the corresponding figure gallery via `python scripts/make_report_plots.py --eval-dir output/master_eval/run_<window> --out-dir docs/assets/plots/run_<window>`.
+
 
 ## Reproducibility checklist
 
@@ -114,7 +133,7 @@ Significance testing is integrated into the master evaluation. Each evaluation p
 
 The within-class champion-versus-runner-up comparison is restricted within model class to avoid mixing scores from different time periods (validation versus test) and different model classes (rule-based on validation versus ML on test).
 
-The DM test takes two return series and tests the null that their forecast loss differential has zero mean against the alternative that it does not. The loss differential is the per-bar net P&L difference, and a significant negative test statistic means the second strategy beats the first. The variance estimator is Newey-West HAC with a bar-frequency-appropriate lag, because consecutive minute bars are not independent and the naive variance would be much too small. The output is a p-value per comparison plus the raw mean differential and the test statistic. A p-value below 0.05 is treated as evidence of a real difference. Anything above is treated as inconclusive, not as evidence of equivalence.
+The DM test takes two return series and tests the null that their forecast loss differential has zero mean against the alternative that it does not. The loss differential is the per-bar net P&L difference, and a significant negative test statistic means the second strategy beats the first. The variance estimator is Newey-West HAC with a bar-frequency-appropriate lag, because consecutive minute bars are not independent and the naive variance would be much too small. The Harvey-Leybourne-Newbold small-sample correction is applied on top of the Newey-West variance to control the size of the test in finite samples; this matches the standard recommendation in the FX-evaluation literature for minute-level data and is what the master-evaluation script reports. The output is a p-value per comparison plus the raw mean differential and the test statistic. A p-value below 0.05 is treated as evidence of a real difference. Anything above is treated as inconclusive, not as evidence of equivalence.
 
 
 ## Walk-forward stability analysis
