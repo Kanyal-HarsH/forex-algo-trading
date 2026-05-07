@@ -43,6 +43,10 @@ python-dotenv==1.2.2
 requests==2.32.5
 beautifulsoup4==4.14.3
 
+# Test runner. Required by bootstrap.py step 5 (pytest verification) and by
+# the project's own test suite under tests/.
+pytest==8.4.0
+
 # ----- Optional dependencies (uncomment to enable) -----
 
 # Playwright drives the headless Chromium used by scripts/export_report_pdf.py

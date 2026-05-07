@@ -386,6 +386,27 @@ class MLStrategy(BaseStrategy):
                 f"MLStrategy '{self.name}' requires features missing from df: {missing}. "
                 f"Re-run scripts/split_fx_data.py to regenerate splits with full feature set."
             )
+        # The LSTM long branch reads features that are NOT in the LR scaler's
+        # feature_cols (e.g. rv_ratio_10_60, same_minute_prev_day_logrange)
+        # directly from df. Silently substituting zeros for those columns made
+        # earlier replication runs produce a degenerate all-FLAT signal with no
+        # error at all, which is hard to diagnose. Validate up-front instead.
+        if self.model_type == "lstm" and self.long_feature_cols:
+            scaler_cols = set(self.feature_cols)
+            df_cols     = set(df.columns)
+            missing_long = [
+                c for c in self.long_feature_cols
+                if c not in scaler_cols and c not in df_cols
+            ]
+            if missing_long:
+                raise KeyError(
+                    f"MLStrategy '{self.name}' (LSTM) needs long-branch features "
+                    f"that are missing from both the scaler and the dataframe: "
+                    f"{missing_long}. This usually means the test/val parquet was "
+                    f"copied from an older clone without the F3 extended features. "
+                    f"Re-run scripts/features_fx_data.py and scripts/split_fx_data.py "
+                    f"to regenerate the dataset with the current feature schema."
+                )
         X = df[self.feature_cols].fillna(0).values
         X_scaled = self.scaler.transform(X)
 

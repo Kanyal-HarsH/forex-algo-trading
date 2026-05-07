@@ -8,7 +8,8 @@ Run this from the repository root after cloning:
 The script handles every step needed to get from a fresh clone to a working
 research environment:
 
-    1. Verifies the Python version is 3.11 or higher.
+    1. Verifies the Python version is 3.11 or 3.12 (3.13 is rejected because
+       the pinned torch==2.6.0 wheels are not yet published for 3.13).
     2. Creates a virtual environment at ./venv if one is not already present.
     3. Upgrades pip, setuptools, and wheel inside the venv.
     4. Installs every direct dependency from requirements.txt.
@@ -60,6 +61,11 @@ REQUIREMENTS = PROJECT_DIR / "requirements.txt"
 
 MIN_PY_MAJOR = 3
 MIN_PY_MINOR = 11
+# Upper bound is set by the pinned torch wheel availability. torch==2.6.0 has
+# wheels for cp311 and cp312; cp313 wheels are not yet published. Bumping
+# this to 13 (or removing the cap) requires either upgrading the torch pin or
+# accepting that users on 3.13 will need to build torch from source.
+MAX_PY_MINOR = 12
 
 PIPELINE_STAGES = [
     ("download", "scripts/download_fx_data.py", "10 to 20 min, network-bound"),
@@ -153,7 +159,19 @@ def step_check_python() -> None:
             f"Install a newer Python from https://www.python.org/downloads/ and re-run."
         )
         sys.exit(1)
-    _ok(f"Python {major}.{minor} satisfies the minimum {MIN_PY_MAJOR}.{MIN_PY_MINOR}")
+    if major == MIN_PY_MAJOR and minor > MAX_PY_MINOR:
+        _err(
+            f"Python {MIN_PY_MAJOR}.{minor} is too new for the pinned dependency set.\n"
+            f"  The current pin requires Python {MIN_PY_MAJOR}.{MIN_PY_MINOR} or "
+            f"{MIN_PY_MAJOR}.{MAX_PY_MINOR}, because torch==2.6.0 does not yet ship "
+            f"wheels for cp{MIN_PY_MAJOR}{minor}.\n"
+            f"  Install Python {MIN_PY_MAJOR}.{MAX_PY_MINOR} from "
+            f"https://www.python.org/downloads/ and re-run, or set up a fresh venv "
+            f"with a 3.{MAX_PY_MINOR} interpreter (e.g. via pyenv or conda)."
+        )
+        sys.exit(1)
+    _ok(f"Python {major}.{minor} is in the supported range "
+        f"({MIN_PY_MAJOR}.{MIN_PY_MINOR} to {MIN_PY_MAJOR}.{MAX_PY_MINOR})")
 
 
 def step_create_venv(reuse: bool = True) -> None:

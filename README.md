@@ -44,7 +44,9 @@ Flags used above:
 - `--no-pipeline`: skip the multi-hour data download and feature build.
 - `--no-train`: skip the multi-hour LR + LSTM training grid.
 
-That single command verifies Python 3.11+, creates `./venv`, upgrades pip, installs every pinned dependency from `requirements.txt`, and runs the pytest suite. Drop both flags to run the full pipeline end to end. Pass `--yes` to accept all prompts unattended.
+That single command verifies that Python is 3.11 or 3.12, creates `./venv`, upgrades pip, installs every pinned dependency from `requirements.txt`, and runs the pytest suite. Drop both flags to run the full pipeline end to end. Pass `--yes` to accept all prompts unattended.
+
+Python 3.13 is rejected by the version check on purpose: the pinned `torch==2.6.0` does not yet ship cp313 wheels, so the install step would fail later with a less informative error. Install Python 3.11 or 3.12 (e.g. via pyenv or python.org) and re-run.
 
 Once the script finishes, activate the environment:
 
@@ -74,6 +76,16 @@ python scripts/make_report_plots.py
 ```
 
 The script reads `output/master_eval/latest_run.txt`, resolves the per-run subdirectory, and writes 33 figures to `docs/assets/plots/run_<window>/`. Use `--eval-dir` to target a different run.
+
+## Known replication gotchas
+
+Notes from a fresh-clone replication pass. Each item lists the symptom, the root cause, and the fix that landed in the codebase.
+
+- **`torch==2.6.0` will not install on Python 3.13.** The pinned wheel only exists for cp311 and cp312 at the time of writing. `bootstrap.py` rejects 3.13 up-front with a clear error message. Install Python 3.11 or 3.12 and re-run.
+- **`python -m pytest tests/ -q` reports "No module named pytest".** Earlier revisions of `requirements.txt` did not list pytest, so the bootstrap test step would fail on a clean venv. The dependency is now pinned (`pytest==8.4.0`) and is installed by the same `pip install -r requirements.txt` step that bootstrap runs.
+- **`scripts/download_fx_data.py` fails with a TLS verification error.** histdata.com has occasionally served an expired or untrusted certificate. The downloader now accepts `--insecure`, which sets `verify=False` on the HTTP session and prints a one-line warning so the relaxation is auditable. Use it only as long as the upstream certificate is broken; remove the flag once the site recovers.
+- **`LSTM_global` (or any LSTM cell) produces no signals or a silent all-FLAT output.** The LSTM long branch reads features such as `rv_ratio_10_60` and `same_minute_prev_day_logrange` that live outside the LR scaler's `feature_cols`. If the test parquet was copied from an older clone, those columns are absent and the older code substituted zeros without complaint. The MLStrategy preflight now raises a clear `KeyError` listing the missing columns and pointing the user back at `scripts/features_fx_data.py` and `scripts/split_fx_data.py`. Do not copy `data/`, `features/`, `labels/`, or `datasets/` between clones; regenerate them via the seven-stage pipeline.
+- **`StandardScaler` files missing from `scalers/`.** `models/` and `scalers/` ship as empty directories via `.gitkeep`. To fit and write the per-pair scalers without rerunning the upstream stages, run `python scripts/split_fx_data.py`. The script writes one `scalers/{PAIR}_scaler.pkl` per pair as a dict `{"scaler": StandardScaler, "feature_cols": [...]}`.
 
 ## At a glance
 
