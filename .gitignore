@@ -29,18 +29,23 @@ ENV/
 # PyCharm
 .idea/
 
-# Project data (gitignored, regenerable from pipeline)
-data/
+# Project data (gitignored, regenerable from pipeline). data/parquet/ is
+# selectively allowed below so the seven cleaned-stage-2 parquets ship in-tree
+# and a fresh clone can run from stage 3 onward without hitting histdata.com.
+data/*
+!data/parquet/
 datasets/
 features/
 labels/
 eda/
 output/
 
-# Binary data formats (catches model checkpoints under models/ and scalers/)
+# Binary data formats (catches model checkpoints under models/ and scalers/).
+# The parquets under data/parquet/ are explicitly re-included.
 *.parquet
 *.pkl
 *.pt
+!data/parquet/*.parquet
 
 # Project local artefacts
 tests/
