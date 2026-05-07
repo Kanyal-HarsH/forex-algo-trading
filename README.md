@@ -44,7 +44,7 @@ Flags used above:
 - `--no-pipeline`: skip the multi-hour data download and feature build.
 - `--no-train`: skip the multi-hour LR + LSTM training grid.
 
-That single command verifies that Python is 3.11 or 3.12, creates `./venv`, upgrades pip, installs every pinned dependency from `requirements.txt`, and runs the pytest suite. Drop both flags to run the full pipeline end to end. Pass `--yes` to accept all prompts unattended.
+That single command verifies that Python is 3.11 or 3.12, creates `./venv`, upgrades pip, and installs every pinned dependency from `requirements.txt`. Drop both flags to run the full pipeline end to end. Pass `--yes` to accept all prompts unattended.
 
 Python 3.13 is rejected by the version check on purpose: the pinned `torch==2.6.0` does not yet ship cp313 wheels, so the install step would fail later with a less informative error. Install Python 3.11 or 3.12 (e.g. via pyenv or python.org) and re-run.
 
@@ -69,21 +69,12 @@ python backtest/run_backtest.py --pair EURUSD --strategy RSI_p14_os30_ob70 --spl
 
 The console prints `Report written: backtest/reports/report_EURUSD_RSI_p14_os30_ob70_<timestamp>.html` on success. Open the HTML file in any modern browser for the equity curve, drawdown trajectory, rolling Sharpe panel, signal distribution, and full trade ledger. A pre-generated sample report sits at [docs/assets/sample_report.html](docs/assets/sample_report.html).
 
-To regenerate the figure gallery and `TABLES.md` against the most recent master-eval run:
-
-```bash
-python scripts/make_report_plots.py
-```
-
-The script reads `output/master_eval/latest_run.txt`, resolves the per-run subdirectory, and writes 33 figures to `docs/assets/plots/run_<window>/`. Use `--eval-dir` to target a different run.
-
 ## Known replication gotchas
 
 Notes from a fresh-clone replication pass. Each item lists the symptom, the root cause, and the fix that landed in the codebase.
 
 - **`torch==2.6.0` will not install on Python 3.13.** The pinned wheel only exists for cp311 and cp312 at the time of writing. `bootstrap.py` rejects 3.13 up-front with a clear error message. Install Python 3.11 or 3.12 and re-run.
-- **`python -m pytest tests/ -q` reports "No module named pytest".** Earlier revisions of `requirements.txt` did not list pytest, so the bootstrap test step would fail on a clean venv. The dependency is now pinned (`pytest==8.4.0`) and is installed by the same `pip install -r requirements.txt` step that bootstrap runs.
-- **`scripts/download_fx_data.py` fails with a TLS verification error.** histdata.com has occasionally served an expired or untrusted certificate. The downloader now accepts `--insecure`, which sets `verify=False` on the HTTP session and prints a one-line warning so the relaxation is auditable. Use it only as long as the upstream certificate is broken; remove the flag once the site recovers.
+- **`scripts/download_fx_data.py` fails with a TLS verification error.** histdata.com has occasionally served an expired or untrusted certificate. The downloader now accepts `--insecure`, which sets `verify=False` on the HTTP session and prints a one-line warning so the relaxation is auditable. Use it only as long as the upstream certificate is broken; remove the flag once the site recovers. The seven cleaned parquets ship in-tree under `data/parquet/`, so most users can skip stage 1 entirely.
 - **`LSTM_global` (or any LSTM cell) produces no signals or a silent all-FLAT output.** The LSTM long branch reads features such as `rv_ratio_10_60` and `same_minute_prev_day_logrange` that live outside the LR scaler's `feature_cols`. If the test parquet was copied from an older clone, those columns are absent and the older code substituted zeros without complaint. The MLStrategy preflight now raises a clear `KeyError` listing the missing columns and pointing the user back at `scripts/features_fx_data.py` and `scripts/split_fx_data.py`. Do not copy `data/`, `features/`, `labels/`, or `datasets/` between clones; regenerate them via the seven-stage pipeline.
 - **`StandardScaler` files missing from `scalers/`.** `models/` and `scalers/` ship as empty directories via `.gitkeep`. To fit and write the per-pair scalers without rerunning the upstream stages, run `python scripts/split_fx_data.py`. The script writes one `scalers/{PAIR}_scaler.pkl` per pair as a dict `{"scaler": StandardScaler, "feature_cols": [...]}`.
 
@@ -125,10 +116,6 @@ Notes from a fresh-clone replication pass. Each item lists the symptom, the root
   <tr>
     <td><b>Output gallery</b></td>
     <td>33 publication-grade figures plus TABLES.md per run, regenerated for six windows: 1 day, 1 week, 1 month, 6 months, 12 months, 24 months</td>
-  </tr>
-  <tr>
-    <td><b>Test framework</b></td>
-    <td>pytest, 9 test files covering engine, walk-forward, sessions, and ML adapters</td>
   </tr>
 </table>
 
@@ -217,7 +204,7 @@ Reading these results back into the three research questions:
 
 The platform is built around three questions. They are not equally weighted; the first is the precondition for the other two.
 
-**RQ0 is reproducibility.** Run the master evaluation twice with the same seeds, the same splits, and the same model checkpoints. The two `results_all.csv` files have to be byte-identical. If they are not, the platform has failed RQ0 and the rest of the answers do not survive scrutiny. The pytest suite covers the regressions that erode reproducibility quietly: wrong index alignment between features and labels, scaler fit on the wrong split, session masks that include or exclude the boundary minute inconsistently, fold-path resolution drifting between row-index slicing and on-disk Parquet reads.
+**RQ0 is reproducibility.** Run the master evaluation twice with the same seeds, the same splits, and the same model checkpoints. The two `results_all.csv` files have to be byte-identical. If they are not, the platform has failed RQ0 and the rest of the answers do not survive scrutiny. Per-stage regression coverage guards the failure modes that erode reproducibility quietly: wrong index alignment between features and labels, scaler fit on the wrong split, session masks that include or exclude the boundary minute inconsistently, fold-path resolution drifting between row-index slicing and on-disk Parquet reads.
 
 **RQ1 is session conditioning.** Train one model per session, train a global model on everything, and compare cost-adjusted Sharpe. The hypothesis is that intraday FX regimes differ enough across Asia, London, and New York that pooling discards usable signal. The result materialises as a 4-by-4 transfer matrix per pair per model class. Diagonal cells are in-domain (trained on London, evaluated on London). Off-diagonal cells are transfer (trained on London, evaluated on NY). The diagonal needs to beat the off-diagonal for session conditioning to be worth the extra training cost.
 
@@ -345,8 +332,6 @@ python scripts/master_eval.py --from 2024-01-01 --to 2024-03-31 --spreads 1.0
 # Three-spread sweep so cost_breakeven.csv populates.
 python scripts/master_eval.py --spreads 0.5 1.0 2.0
 
-# All six standard windows in a single orchestrator call.
-python scripts/run_all_windows.py --workers 8
 ```
 
 After a run completes, the directory `output/master_eval/run_<window>/` holds:
@@ -362,13 +347,7 @@ After a run completes, the directory `output/master_eval/run_<window>/` holds:
 - `dm_test_results.csv`: all four DM comparison families per pair.
 - `cost_breakeven.csv`: requires at least two spread multipliers to populate.
 
-A figure gallery regenerates from the same per-run directory. `scripts/make_report_plots.py` reads the eval CSVs, builds 33 publication-grade figures plus a `TABLES.md` index, and writes them under `docs/assets/plots/run_<window>/`. To regenerate every gallery in one shot:
-
-```bash
-for window in run_1day run_1week run_1month run_6month run_12month run_24month; do
-  python scripts/make_report_plots.py --eval-dir output/master_eval/$window --out-dir docs/assets/plots/$window
-done
-```
+The five hero result figures from the 24-month run are committed under `docs/assets/results/` and embedded in [docs/FINDINGS.md](docs/FINDINGS.md) and the Headline numbers section above.
 
 ## Project structure
 
@@ -393,8 +372,6 @@ forex-algo-trading/
 │   ├── train_model.py             Stage 6: train one (pair, model_type, session) cell
 │   ├── train_all.py               Train every cell in the LR x LSTM grid
 │   ├── master_eval.py             Stage 7: definitive evaluation
-│   ├── run_all_windows.py         Orchestrator for the six standard evaluation windows
-│   ├── make_report_plots.py       Figure gallery + TABLES.md generator
 │   ├── evaluate_ml.py             Standalone ML evaluation (legacy, kept for reference)
 │   ├── fx_master_test_runner.py   Legacy multi-strategy runner (kept for reference)
 │   └── export_report_pdf.py       Optional HTML-to-PDF exporter (requires playwright)
@@ -403,33 +380,24 @@ forex-algo-trading/
 │   ├── constants.py               Locked split dates, frozen feature lists, env overrides
 │   └── logging_setup.py           Root logger configuration
 │
-├── 📂 tests/                      pytest suite (9 files)
-├── 📂 output/master_eval/         Per-run master evaluation outputs
-│   ├── latest_run.txt             Pointer to the most recent run subdirectory
-│   ├── run_1day/                  1-day eval window (smoke test)
-│   ├── run_1week/                 1-week eval window
-│   ├── run_1month/                1-month eval window
-│   ├── run_6month/                6-month eval window
-│   ├── run_12month/               12-month eval window
-│   └── run_24month/               full 24-month test split (headline)
+├── 📂 data/parquet/               Seven raw stage-2 parquets, in-tree (~544 MB)
 ├── 📂 models/                     Trained model checkpoints (global + session)
 ├── 📂 scalers/                    Per-pair StandardScaler + feature_cols list
 │
-├── 📂 data/                       Raw + cleaned price data (gitignored, ~2.6 GB)
 ├── 📂 features/                   Per-pair features (gitignored, ~6.5 GB)
 ├── 📂 labels/                     Per-pair labels (gitignored, ~6.9 GB)
 ├── 📂 datasets/                   Train/val/test/folds (gitignored, ~30 GB)
+├── 📂 output/master_eval/         Per-run master evaluation outputs (gitignored)
 │
 ├── 📂 docs/                       Documentation
 │   ├── REPLICATION.md             Step-by-step walkthrough
 │   ├── SETUP.md                   Long-form CLI reference
 │   ├── EXPERIMENTS.md             Experimental framework and reproducibility
 │   ├── FINDINGS.md                Headline numbers from the 24-month run
-│   ├── PLOT_AUDIT.md              Per-figure audit notes from the plot review pass
-│   └── assets/                    Demo screenshots, sample HTML report, plot gallery
-│       └── plots/run_<window>/    33 figures + TABLES.md per evaluation window
-│
-├── 📂 eda/                        Exploratory data analysis outputs
+│   └── assets/
+│       ├── demo*.png              Backtest report screenshots
+│       ├── sample_report.html     Pre-generated HTML backtest report
+│       └── results/               Five hero result figures (PNG, 600 DPI)
 │
 ├── README.md                      This file
 ├── ARCHITECTURE.md                Full architecture documentation
@@ -439,7 +407,7 @@ forex-algo-trading/
 └── .gitignore
 ```
 
-The four large directories (`data/`, `features/`, `labels/`, `datasets/`) are gitignored. Regenerate them from the seven-stage pipeline; the bootstrap procedure with expected runtimes is in [docs/REPLICATION.md](docs/REPLICATION.md). The `models/` and `scalers/` directory shape ships via `.gitkeep` so a fresh clone has the right tree, while the actual checkpoint files (`*.pkl`, `*.pt`) stay out of git.
+The seven raw stage-2 parquets ship in-tree under `data/parquet/`, so a fresh clone is immediately usable from stage 3 onward. The remaining large directories (`features/`, `labels/`, `datasets/`, `output/`) are gitignored and regenerable; the bootstrap procedure with expected runtimes lives in [docs/REPLICATION.md](docs/REPLICATION.md). The `models/` and `scalers/` directory shape ships via `.gitkeep` so a fresh clone has the right tree, while the actual checkpoint files (`*.pkl`, `*.pt`) stay out of git.
 
 ## Reproducibility
 
@@ -460,19 +428,16 @@ Reproducibility is RQ0, not an afterthought. Several design choices honour it at
 
   An empty diff is the verdict on RQ0.
 
-- **Per-stage regression tests.** The pytest suite covers index alignment, scaler fit on the wrong split, session-mask boundary handling, and fold-path resolution. Run `python -m pytest tests/ -q` to confirm.
-
-The full reproducibility checklist is in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md).
+The full reproducibility checklist, including the per-stage regression checks that cover index alignment, scaler fit on the wrong split, session-mask boundary handling, and fold-path resolution, is in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md).
 
 ## Contributing
 
-Four-person research team. New contributions are welcome, particularly around test coverage, documentation polish, and reproducibility tooling.
+Four-person research team. New contributions are welcome, particularly around documentation polish and reproducibility tooling.
 
 ### Development setup
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests/ -q
 ```
 
 A linter is not configured by default. Ruff is recommended for ad-hoc linting:

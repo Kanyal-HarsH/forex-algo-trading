@@ -140,7 +140,7 @@ diff output/master_eval/run_24month/results_all_run1.csv \
      output/master_eval/run_24month/results_all.csv
 ```
 
-An empty diff is the verdict. The pytest suite (twelve files, sixty-three tests) covers the regressions that erode reproducibility silently: wrong index alignment between features and labels, scaler fit on the wrong split, session masks that include or exclude the boundary minute inconsistently, fold-path resolution drifting between row-index slicing and on-disk Parquet reads.
+An empty diff is the verdict. Per-stage regression coverage guards the failure modes that erode reproducibility silently: wrong index alignment between features and labels, scaler fit on the wrong split, session masks that include or exclude the boundary minute inconsistently, fold-path resolution drifting between row-index slicing and on-disk Parquet reads.
 
 ### RQ1 session conditioning
 
