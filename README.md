@@ -27,7 +27,7 @@ The five entries below are the canonical surface. Pick the one that matches the 
 | [docs/SETUP.md](docs/SETUP.md) | Long-form install reference. Every CLI flag for every script. Bootstrap procedure. Three install paths. | When a flag in REPLICATION.md is unfamiliar. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Six Mermaid diagrams (system, sequence, classes, data flow, evaluation tiers, dependencies), twelve architecture decision records, source map, implementation notes. | Before refactoring or proposing a design change. |
 | [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md) | The three research questions, the experiment catalogue, the reproducibility checklist, the Diebold-Mariano test design, the walk-forward stability formula. | Before running the master evaluation. |
-| [docs/FINDINGS.md](docs/FINDINGS.md) | Results scaffolding. Filled in by hand from `output/master_eval/run_<window>/master_report.txt` after the final run. | After a master-eval run completes and the headline numbers need writing up. |
+| [docs/FINDINGS.md](docs/FINDINGS.md) | Headline numbers from the 24-month master-eval run on the locked 2024 to 2025 test split: top-10 unified leaderboard, per-pair winners, family-level averages, the DM-test panel, and the verdicts on RQ0 / RQ1 / RQ2. | After a master-eval run; cross-checked with `output/master_eval/run_24month/master_report.txt`. |
 
 The README from here on is a snapshot: motivation, demo screenshots, headline numbers, strategy menu, project layout, contributing notes.
 
@@ -116,7 +116,7 @@ The script reads `output/master_eval/latest_run.txt`, resolves the per-run subdi
   </tr>
   <tr>
     <td><b>Test framework</b></td>
-    <td>pytest, 12 test files covering engine, walk-forward, sessions, and ML adapters</td>
+    <td>pytest, 9 test files covering engine, walk-forward, sessions, and ML adapters</td>
   </tr>
 </table>
 
@@ -224,11 +224,11 @@ flowchart LR
 
 Stages 1 to 5 turn raw histdata CSVs into per-pair Parquets of around 70 feature columns and a three-class label. Stage 6 trains models. Stage 7 evaluates. Each stage is a separate script writing to a fixed location with a fixed schema, so a failure in one stage can be repaired and rerun without invalidating the rest.
 
-The strategy stack is layered. Layer one is the 13 rule-based families. Layer two is Logistic Regression on a frozen 18-feature schema, fit per (pair, session). Layer three is a two-branch LSTM. The short branch sees a 15-bar window of returns and short-horizon volatility. The long branch sees a 60-bar window of multi-scale realised volatility. The branches merge into a 64-d vector, the 4-d session one-hot is concatenated, and a small MLP head produces a three-class softmax over DOWN, FLAT, UP.
+Three layers in the strategy stack. Layer one is the 13 rule-based families. Layer two is Logistic Regression on a frozen 18-feature schema, fit per (pair, session). Layer three is a two-branch LSTM. The short branch sees a 15-bar window of returns and short-horizon volatility. The long branch sees a 60-bar window of multi-scale realised volatility. The two branches merge into a 64-d vector, the 4-d session one-hot is concatenated, and a small MLP head produces a three-class softmax over DOWN, FLAT, UP.
 
-The master evaluation is tiered for a reason. T1 screens, T2 sweeps session and direction, T3 sweeps a small TP/SL grid, T4 measures stability across five walk-forward folds, T5 produces the final result on the locked test split. T1 through T3 only ever touch validation data. T4 only ever touches training folds. T5 is the only tier that touches the test split, and it touches it exactly once per evaluation cycle.
+Tiering of the master evaluation is deliberate. T1 screens, T2 sweeps session and direction, T3 sweeps a small TP/SL grid, T4 measures stability across five walk-forward folds, T5 produces the final result on the locked test split. T1 through T3 only ever touch validation data. T4 only ever touches training folds. T5 is the only tier that touches the test split, and it touches it exactly once per evaluation cycle.
 
-The full version lives in [ARCHITECTURE.md](ARCHITECTURE.md) with all six diagrams, the architecture decision records, the source map, and a section on implementation pitfalls (label remap, batched LSTM inference, scaler contract, fold parquet paths).
+A longer treatment lives in [ARCHITECTURE.md](ARCHITECTURE.md) with all six diagrams, the architecture decision records, the source map, and a section on implementation pitfalls (label remap, batched LSTM inference, scaler contract, fold parquet paths).
 
 ## Strategy menu
 
@@ -323,7 +323,7 @@ After a run completes, the directory `output/master_eval/run_<window>/` holds:
 - `dm_test_results.csv`: all four DM comparison families per pair.
 - `cost_breakeven.csv`: requires at least two spread multipliers to populate.
 
-The report-plot generator reads the same directory and writes the figure gallery and `TABLES.md` to `docs/assets/plots/run_<window>/`. To regenerate every gallery:
+A figure gallery regenerates from the same per-run directory. `scripts/make_report_plots.py` reads the eval CSVs, builds 33 publication-grade figures plus a `TABLES.md` index, and writes them under `docs/assets/plots/run_<window>/`. To regenerate every gallery in one shot:
 
 ```bash
 for window in run_1day run_1week run_1month run_6month run_12month run_24month; do
@@ -364,7 +364,7 @@ forex-algo-trading/
 │   ├── constants.py               Locked split dates, frozen feature lists, env overrides
 │   └── logging_setup.py           Root logger configuration
 │
-├── 📂 tests/                      pytest suite (12 files)
+├── 📂 tests/                      pytest suite (9 files)
 ├── 📂 output/master_eval/         Per-run master evaluation outputs
 │   ├── latest_run.txt             Pointer to the most recent run subdirectory
 │   ├── run_1day/                  1-day eval window (smoke test)
@@ -385,7 +385,7 @@ forex-algo-trading/
 │   ├── REPLICATION.md             Step-by-step walkthrough
 │   ├── SETUP.md                   Long-form CLI reference
 │   ├── EXPERIMENTS.md             Experimental framework and reproducibility
-│   ├── FINDINGS.md                Results scaffolding
+│   ├── FINDINGS.md                Headline numbers from the 24-month run
 │   ├── PLOT_AUDIT.md              Per-figure audit notes from the plot review pass
 │   └── assets/                    Demo screenshots, sample HTML report, plot gallery
 │       └── plots/run_<window>/    33 figures + TABLES.md per evaluation window
@@ -507,7 +507,7 @@ The platform is built and maintained by four researchers.
 | Harsh Singh Kanyal        |
 | Haruka Iwami              |
 | Istiak Ahmed              |
-| Savindi Hansila Weerakoon | 
+| Savindi Hansila Weerakoon |
 
 <img src="https://capsule-render.vercel.app/api?type=waving&color=0:2c5364,100:0f2027&height=100&section=footer" width="100%"/>
 
