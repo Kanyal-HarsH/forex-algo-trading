@@ -53,6 +53,11 @@ backtest/reports/
 *.html
 .gitattributes
 
+# bootstrap.py runtime artefacts
+bootstrap.log
+.bootstrap_state.json
+requirements.lock.txt
+
 # Allow demo assets and the sample report to ship under docs/assets/
 !docs/assets/*.html
 !docs/assets/*.png

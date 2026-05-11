@@ -37,49 +37,140 @@ ls
 
 ## Step 3: pick a setup path
 
-Two paths. Pick one.
+Both paths reach the same end state. Path A is the faster way through a first run; Path B is what to use when a stage needs partial rerun or close inspection along the way.
+
+### When to pick which
+
+| Scenario | Path |
+|----------|------|
+| First clone, single machine, single user | A |
+| Bootstrap halted partway and you want to re-run from the breakpoint | A with `--resume` |
+| Debugging a stage and inspecting outputs between steps | B |
+| Editing scripts between pipeline stages | B |
+| CI / unattended setup | A with `--yes` |
+| Air-gapped or restricted-proxy environment | B (or A with `--offline`) |
 
 ### Path A: bootstrap script (recommended)
 
-The repository ships with a one-step setup script at the project root. The flags used below:
+`bootstrap.py` collapses preflight, environment setup, dependency install, verification, pipeline, and training into a single invocation. A stage whose outputs are already on disk is skipped, which makes the script safe to re-run. Per-stage status is persisted in `.bootstrap_state.json`, and `--resume` consults that file to continue from the first unfinished step. Every subprocess call and its exit code is appended to `./bootstrap.log` for post-mortem inspection.
 
-- `--no-pipeline`: skip the multi-hour data pipeline (run later in step 6)
-- `--no-train`: skip the multi-hour model training (run later in step 7)
+Common invocations:
 
 ```bash
-python bootstrap.py --no-pipeline --no-train
+python bootstrap.py --doctor          # diagnostic report only; no installs
+python bootstrap.py --minimal         # env only; skip pipeline and training
+python bootstrap.py --yes             # full unattended setup end to end
+python bootstrap.py --resume          # continue from the last failed stage
 ```
 
-The script verifies Python is 3.11 or higher, creates `./venv`, upgrades pip, installs every pinned dependency from `requirements.txt`, and runs the pytest suite. Without `--no-pipeline --no-train` the script also prompts before running the full pipeline and the full training grid; for a step-by-step walkthrough, skip those for now.
+The flag groups:
+
+- Setup variant: `--yes`, `--minimal`, `--with-pdf` (also install playwright + chromium for PDF report export).
+- Environment: `--cpu` / `--gpu` force the torch wheel choice (default: autodetect via `nvidia-smi`); `--rebuild-venv` deletes and recreates `./venv`; `--offline` refuses network calls and fails early if any are needed; `--no-tests` skips the pytest verification.
+- Resume / re-run: `--resume` continues from the last unfinished stage; `--force-stage NAME` re-runs one stage by name (repeatable), with `NAME` in `download clean features labels split train`.
+- Diagnostics: `--doctor` prints a Python / pip / OS / disk / CUDA / network report and exits; `--log PATH` overrides the log path.
+
+Path A flow:
+
+```mermaid
+flowchart TD
+    A0([python bootstrap.py]) --> A1[1. Parse flags<br/>--yes / --minimal / --cpu /<br/>--gpu / --resume / --doctor]
+    A1 --> A2[2. Preflight<br/>Python 3.10-3.13, ensurepip,<br/>git, disk &gt;= 60 GB, network]
+    A2 --> A3{--doctor?}
+    A3 -- yes --> A_END_DOC([Print report, exit 0])
+    A3 -- no --> A4[3. venv create or reuse<br/>+ pip / setuptools / wheel upgrade]
+    A4 --> A5[4. Pick torch wheel<br/>nvidia-smi -&gt; cu121 else cpu]
+    A5 --> A6[5. Install deps<br/>core + extras + lockfile]
+    A6 --> A7[6. .env bootstrap<br/>copy .env.example if missing]
+    A7 --> A8[7. Verify<br/>pytest tests/ -q]
+    A8 --> A9{Pipeline?<br/>skip if --minimal}
+    A9 -- yes --> A10[8. Pipeline 5 stages<br/>each skipped if output exists]
+    A9 -- no --> A12
+    A10 --> A11{Train?<br/>skip if --minimal}
+    A11 -- yes --> A_TRAIN[9. Train 28 LR + 28 LSTM<br/>per-cell skip if checkpoint present]
+    A11 -- no --> A12
+    A_TRAIN --> A12[10. Summary table<br/>step-by-step ok / skip / fail]
+    A12 --> A_END([next steps printed])
+
+    classDef preflight fill:#eef6ff,stroke:#3a78c2;
+    classDef install fill:#e7f5ee,stroke:#2b8a3e;
+    classDef heavy fill:#f6ecff,stroke:#6f3fa1;
+    classDef done fill:#fff8e1,stroke:#b07b00;
+    class A2,A3 preflight;
+    class A4,A5,A6,A7,A8 install;
+    class A10,A_TRAIN heavy;
+    class A12,A_END,A_END_DOC done;
+```
 
 After the script completes, activate the environment:
 
 ```bash
-source venv/bin/activate
+source venv/bin/activate          # macOS / Linux
+venv\Scripts\activate             # Windows PowerShell
 ```
 
-On Windows: `venv\Scripts\activate`. Skip ahead to step 5.
+Skip ahead to step 5 if you let bootstrap stop at `--minimal`, or to step 10 if bootstrap ran the pipeline and training.
 
-### Path B: manual setup
+### Path B: script-by-script (debugging and partial reruns)
 
-If `bootstrap.py` fails, or manual control is preferred:
+Path B unfolds the same operations one command at a time. The trade-off is verbosity in exchange for visibility: a bad output is spotted at the line where it appears, not several minutes later when a downstream stage chokes on the bad input.
 
 ```bash
 python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+source venv/bin/activate                                  # Windows: venv\Scripts\activate
+python -m pip install --upgrade pip setuptools wheel
+pip install -r requirements-core.txt
+pip install -r requirements-extras.txt
 ```
 
-On Windows: `venv\Scripts\activate` for the second line.
-
-`requirements.txt` is pinned to versions tested in development: `pandas==3.0.1`, `numpy==2.4.3`, `pyarrow==23.0.1`, `scikit-learn==1.8.0`, `torch==2.6.0`, `scipy==1.17.1`, `matplotlib==3.10.8`, `seaborn==0.13.2`, `PyYAML==6.0.3`, `python-dotenv==1.2.2`, `requests==2.32.5`, `beautifulsoup4==4.14.3`.
-
-Optional dependency for the PDF report exporter:
+For GPU machines, install torch with the CUDA index before the two `pip install -r` lines:
 
 ```bash
-pip install playwright
+pip install --upgrade torch --index-url https://download.pytorch.org/whl/cu121
+```
+
+For PDF export, opt in after the rest installs cleanly:
+
+```bash
+pip install playwright~=1.45
 python -m playwright install chromium
 ```
+
+Both `requirements-core.txt` and `requirements-extras.txt` use compatible-release pins (`~=`), which lets pip substitute a patch release when the originally tested version has dropped off PyPI. For exact reproduction of a known-good environment, `bootstrap.py` runs `pip freeze` after a clean install and writes the result to `requirements.lock.txt`. The top-level `requirements.txt` still resolves correctly; it has been reduced to a back-compat shim that `-r`-includes both split files in order.
+
+Path B flow with the "stop and verify" checkpoint after each step:
+
+```mermaid
+flowchart TD
+    B0([git clone the repo]) --> B1[Step 1. Prereqs<br/>python --version 3.10-3.13<br/>git --version, df -h .]
+    B1 --> B2[Step 2. python -m venv venv<br/>activate venv]
+    B2 --> B3[Step 3. pip install -U pip<br/>pip install -r requirements-core.txt<br/>pip install -r requirements-extras.txt]
+    B3 --> B4[Step 4. cp .env.example .env<br/>edit if needed]
+    B4 --> B5[Step 5. pytest tests/ -q<br/>VERIFY: 63 passed]
+    B5 --> B6[Step 6. Pipeline]
+
+    B6 --> B6a[6a. download_fx_data.py<br/>VERIFY: data/parquet/PAIR/*.parquet<br/>SKIP if shipped in-tree]
+    B6a --> B6b[6b. clean_fx_data.py<br/>VERIFY: data/processed/cleaned/*]
+    B6b --> B6c[6c. features_fx_data.py<br/>VERIFY: features/pair/* with 70 cols]
+    B6c --> B6d[6d. labels_fx_data.py<br/>VERIFY: labels/pair/*]
+    B6d --> B6e[6e. split_fx_data.py<br/>VERIFY: datasets/train, val, test<br/>+ scalers/PAIR_scaler.pkl]
+
+    B6e --> B7[Step 7. train_all.py --model-type all<br/>VERIFY: 56 files across<br/>models/global, session/london, ny, asia]
+    B7 --> B8[Step 8. One backtest<br/>backtest/run_backtest.py<br/>--pair EURUSD --strategy LR_global<br/>--from 2024-01-02 --to 2024-01-02]
+    B8 --> B9[Step 9. master_eval.py<br/>--eval-year 2024 --spreads 1.0<br/>VERIFY: output/master_eval/master_report.txt]
+    B9 --> B_END([Done. Cross-check<br/>results_all.csv vs prior run<br/>for RQ0])
+
+    classDef setup fill:#eef6ff,stroke:#3a78c2;
+    classDef pipe fill:#f6ecff,stroke:#6f3fa1;
+    classDef train fill:#ffeede,stroke:#cc5500;
+    classDef done fill:#fff8e1,stroke:#b07b00;
+    class B1,B2,B3,B4,B5 setup;
+    class B6,B6a,B6b,B6c,B6d,B6e pipe;
+    class B7 train;
+    class B8,B9,B_END done;
+```
+
+Continue with step 4 for `.env` setup, then step 5 for verification, then the pipeline in step 6.
 
 ## Step 4: configuration via `.env`
 

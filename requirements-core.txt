@@ -1,0 +1,35 @@
+# forex-algo-trading core runtime dependencies.
+#
+# Compatible-release pins (~=) trade exact reproducibility for fresh-clone
+# resilience: pip is free to pull a new patch release if the pinned one
+# disappears from PyPI. bootstrap.py writes requirements.lock.txt after a
+# successful install for byte-identical reproducibility.
+#
+# torch is intentionally a range here because the bootstrap step picks the
+# CPU or CUDA wheel at install time via --index-url. Letting torch float
+# inside [2.2, 2.7) covers Python 3.10 through 3.13 with prebuilt wheels.
+
+# Data manipulation and IO
+pandas~=2.2
+numpy~=1.26
+pyarrow~=16.0
+
+# Machine learning - classical
+scikit-learn~=1.5
+
+# Machine learning - deep
+torch>=2.2,<2.7
+
+# Statistics
+scipy~=1.13
+
+# Configuration loading
+PyYAML~=6.0
+python-dotenv~=1.0
+
+# HTTP client and HTML parsing (download_fx_data.py)
+requests~=2.32
+beautifulsoup4~=4.12
+
+# Test runner
+pytest~=8.2

@@ -10,31 +10,35 @@ The full pipeline run from a cold clone takes roughly 90 minutes to 3 hours of h
 The repository ships with a one-step setup script at the root. It handles steps 1 through 7 of this document automatically.
 
 ```bash
-python bootstrap.py                    # interactive (recommended on first run)
+python bootstrap.py --doctor           # diagnostic report only; no installs
+python bootstrap.py --minimal          # env only, skip pipeline and training
 python bootstrap.py --yes              # unattended; runs everything including pipeline and training
-python bootstrap.py --no-pipeline --no-train   # environment only, skip the long steps
+python bootstrap.py --resume           # continue from the last failed stage
 ```
 
 The script:
 
-1. Verifies the Python version is 3.11 or higher.
-2. Creates `./venv` if missing.
+1. Runs a preflight (Python in 3.10-3.13 with `ensurepip` fallback, pip availability, disk >= 60 GB, network reachability).
+2. Creates `./venv` if missing (or rebuilds with `--rebuild-venv`).
 3. Upgrades pip, setuptools, and wheel inside the venv.
-4. Installs every pinned dependency from `requirements.txt`.
-5. Runs the pytest suite to verify the install.
-6. Prompts before running the data pipeline (stages 1 to 5).
-7. Prompts before training the LR x LSTM model grid.
+4. Picks the torch wheel (CPU by default, CUDA `cu121` when `nvidia-smi` is on PATH; override with `--cpu` or `--gpu`).
+5. Installs `requirements-core.txt` then `requirements-extras.txt`, then writes a frozen `requirements.lock.txt`.
+6. Copies `.env.example` to `.env` if `.env` is absent.
+7. Runs the pytest suite to verify the install.
+8. Prompts before running the data pipeline (stages 1 to 5). Each stage is skipped if its outputs are already on disk.
+9. Prompts before training the LR x LSTM model grid. Per-cell checkpoints are skipped if already present.
+10. Prints a step-by-step summary table with `ok` / `skip` / `fail` per step.
 
-After the script completes, activate the venv in your shell (`source venv/bin/activate` on macOS / Linux, `venv\Scripts\activate` on Windows) and run `python scripts/master_eval.py --eval-year 2024 --spreads 1.0` to produce the first evaluation.
+Once the script finishes, activate the venv in your shell (`source venv/bin/activate` on macOS or Linux, `venv\Scripts\activate` on Windows). The first evaluation is then one command away: `python scripts/master_eval.py --eval-year 2024 --spreads 1.0`.
 
-The remainder of this document is the manual reference for each step the bootstrap script automates.
+The rest of this document is the manual reference for each step the bootstrap script automates.
 
 
 ## Prerequisites
 
 | Requirement | Minimum version | Check command | Expected output |
 |-------------|-----------------|---------------|-----------------|
-| Python | 3.11 | `python --version` | `Python 3.11.x` (3.13 is tested in development) |
+| Python | 3.10 | `python --version` | `Python 3.10.x` through `Python 3.13.x` |
 | Git | 2.30+ | `git --version` | `git version 2.x.x` |
 | pip | 23+ | `pip --version` | `pip XX.Y from ...` |
 | Free disk space | 50 GB | `df -h .` (Unix) / `dir` (Windows) | shows free space on the working partition |

@@ -1,45 +1,40 @@
 #!/usr/bin/env python3
 """One-step setup for forex-algo-trading.
 
-Run this from the repository root after cloning:
+Common invocations:
 
-    python bootstrap.py
+    python bootstrap.py --doctor          Diagnostic report only; no installs.
+    python bootstrap.py --minimal         Env only; skip pipeline and training.
+    python bootstrap.py --yes             Full unattended setup end to end.
+    python bootstrap.py --resume          Continue from the last failed stage.
 
-The script handles every step needed to get from a fresh clone to a working
-research environment:
+Flag groups:
 
-    1. Verifies the Python version is 3.11 or 3.12 (3.13 is rejected because
-       the pinned torch==2.6.0 wheels are not yet published for 3.13).
-    2. Creates a virtual environment at ./venv if one is not already present.
-    3. Upgrades pip, setuptools, and wheel inside the venv.
-    4. Installs every direct dependency from requirements.txt.
-    5. Verifies the install by running the pytest suite.
-    6. Optionally runs the data pipeline stages 1 to 5 (downloads, cleans,
-       computes features, builds labels, writes splits and scalers).
-    7. Optionally trains every model cell in the LR x LSTM grid.
+  Setup variant
+    --yes, -y           Accept all interactive prompts.
+    --minimal           Skip pipeline and training (env only).
+    --with-pdf          Also install playwright + chromium for PDF export.
 
-Steps 6 and 7 prompt before running because they take hours. Use --yes to
-accept all prompts and run the full setup unattended. Use --no-pipeline or
---no-train to skip the long-running steps explicitly.
+  Environment
+    --cpu               Force CPU torch wheel.
+    --gpu               Force CUDA (cu121) torch wheel.
+    --rebuild-venv      Delete and recreate venv even if present.
+    --offline           Refuse network calls; fail early if any are needed.
+    --no-tests          Skip pytest verification.
 
-Examples:
+  Resume / re-run
+    --resume            Continue from the last unfinished stage.
+    --force-stage NAME  Re-run a specific stage by name. Repeatable. Stage
+                        names: download clean features labels split train.
 
-    # Interactive setup (recommended on first run):
-    python bootstrap.py
+  Diagnostics
+    --doctor            Print Python / pip / OS / disk / CUDA / network and exit.
+    --log PATH          Write bootstrap log to PATH (default ./bootstrap.log).
 
-    # Unattended full setup, accept all prompts:
-    python bootstrap.py --yes
+After bootstrap completes, activate the environment:
 
-    # Set up the environment only, skip the pipeline and training:
-    python bootstrap.py --no-pipeline --no-train
-
-    # Pipeline only, skip training:
-    python bootstrap.py --no-train
-
-After bootstrap completes, activate the environment in your shell with:
-
-    source venv/bin/activate          # macOS / Linux
-    venv\\Scripts\\activate            # Windows
+    source venv/bin/activate              macOS / Linux
+    venv\\Scripts\\activate                 Windows PowerShell
 
 And run the master evaluation:
 
@@ -48,65 +43,114 @@ And run the master evaluation:
 from __future__ import annotations
 
 import argparse
+import json
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 import textwrap
+import time
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent
 VENV_DIR = PROJECT_DIR / "venv"
-REQUIREMENTS = PROJECT_DIR / "requirements.txt"
+ENV_FILE = PROJECT_DIR / ".env"
+ENV_EXAMPLE = PROJECT_DIR / ".env.example"
+STATE_FILE = PROJECT_DIR / ".bootstrap_state.json"
+LOG_FILE_DEFAULT = PROJECT_DIR / "bootstrap.log"
 
-MIN_PY_MAJOR = 3
-MIN_PY_MINOR = 11
-# Upper bound is set by the pinned torch wheel availability. torch==2.6.0 has
-# wheels for cp311 and cp312; cp313 wheels are not yet published. Bumping
-# this to 13 (or removing the cap) requires either upgrading the torch pin or
-# accepting that users on 3.13 will need to build torch from source.
-MAX_PY_MINOR = 12
+REQUIREMENTS_CORE = PROJECT_DIR / "requirements-core.txt"
+REQUIREMENTS_EXTRAS = PROJECT_DIR / "requirements-extras.txt"
+REQUIREMENTS_LOCK = PROJECT_DIR / "requirements.lock.txt"
+
+PY_MIN = (3, 10)
+PY_MAX = (3, 13)
+MIN_DISK_GB = 60
+
+PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"]
+SESSIONS_NON_GLOBAL = ["london", "ny", "asia"]
+
+CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu121"
 
 PIPELINE_STAGES = [
-    ("download", "scripts/download_fx_data.py", "10 to 20 min, network-bound"),
-    ("clean",    "scripts/clean_fx_data.py",    "5 to 10 min"),
-    ("features", "scripts/features_fx_data.py", "45 to 90 min, CPU-bound"),
-    ("labels",   "scripts/labels_fx_data.py",   "5 to 10 min"),
-    ("split",    "scripts/split_fx_data.py",    "10 to 15 min"),
+    ("download", "scripts/download_fx_data.py",
+        "Stage 1: raw download. Skipped automatically if data/parquet/*.parquet ship in-tree."),
+    ("clean",    "scripts/clean_fx_data.py",
+        "Stage 2: clean (5-10 min)."),
+    ("features", "scripts/features_fx_data.py",
+        "Stage 3: features (20-60 min, the largest stage)."),
+    ("labels",   "scripts/labels_fx_data.py",
+        "Stage 4: labels (5-10 min)."),
+    ("split",    "scripts/split_fx_data.py",
+        "Stage 5: train/val/test splits, folds, scalers (10-15 min)."),
 ]
+PIPELINE_NAMES = [name for name, _, _ in PIPELINE_STAGES]
+ALL_STAGE_NAMES = PIPELINE_NAMES + ["train"]
+
+_TTY = sys.stdout.isatty()
+GREEN  = "\033[92m" if _TTY else ""
+RED    = "\033[91m" if _TTY else ""
+YELLOW = "\033[93m" if _TTY else ""
+CYAN   = "\033[96m" if _TTY else ""
+BOLD   = "\033[1m"  if _TTY else ""
+DIM    = "\033[2m"  if _TTY else ""
+RESET  = "\033[0m"  if _TTY else ""
+
+_LOG_FH = None
 
 
-# ----- output helpers
+# ----------------------------------------------------------------------
+# Logging and console output
+# ----------------------------------------------------------------------
+
+def _log_open(path: Path) -> None:
+    global _LOG_FH
+    _LOG_FH = path.open("a", encoding="utf-8")
+    _LOG_FH.write(f"\n--- bootstrap start {datetime.now(timezone.utc).isoformat()} ---\n")
+    _LOG_FH.flush()
+
+
+def _log(msg: str) -> None:
+    if _LOG_FH is not None:
+        _LOG_FH.write(msg + "\n")
+        _LOG_FH.flush()
+
+
+def _emit(prefix: str, msg: str, color: str = "") -> None:
+    line = f"  {prefix:<6}{msg}"
+    print(f"{color}{line}{RESET}" if color else line)
+    _log(line)
+
+
+def _ok(msg: str) -> None:   _emit("ok",   msg, GREEN)
+def _info(msg: str) -> None: _emit("..",   msg)
+def _warn(msg: str) -> None: _emit("warn", msg, YELLOW)
+def _err(msg: str) -> None:  _emit("!!",   msg, RED)
+def _skip(msg: str) -> None: _emit("skip", msg, DIM)
 
 
 def _print_header(title: str) -> None:
-    line = "=" * 78
+    bar = "=" * 78
     print()
-    print(line)
-    print(f"  {title}")
-    print(line)
+    print(f"{BOLD}{bar}{RESET}")
+    print(f"{BOLD}  {title}{RESET}")
+    print(f"{BOLD}{bar}{RESET}")
+    _log(f"\n{bar}\n  {title}\n{bar}")
 
 
 def _print_step(n: int, total: int, title: str) -> None:
     print()
-    print(f"[{n}/{total}] {title}")
+    print(f"{BOLD}[{n}/{total}] {title}{RESET}")
     print("-" * 78)
-
-
-def _ok(msg: str) -> None:
-    print(f"  ok  {msg}")
-
-
-def _info(msg: str) -> None:
-    print(f"  ..  {msg}")
-
-
-def _err(msg: str) -> None:
-    print(f"  !!  {msg}")
+    _log(f"\n[{n}/{total}] {title}\n" + "-" * 78)
 
 
 def _confirm(question: str, default_yes: bool = False, assume_yes: bool = False) -> bool:
     if assume_yes:
+        _log(f"AUTO-YES: {question}")
         return True
     suffix = " [Y/n] " if default_yes else " [y/N] "
     while True:
@@ -116,14 +160,13 @@ def _confirm(question: str, default_yes: bool = False, assume_yes: bool = False)
             return default_yes
         if not answer:
             return default_yes
-        if answer in {"y", "yes"}:
-            return True
-        if answer in {"n", "no"}:
-            return False
+        if answer in {"y", "yes"}: return True
+        if answer in {"n", "no"}:  return False
 
 
-# ----- venv helpers
-
+# ----------------------------------------------------------------------
+# Subprocess
+# ----------------------------------------------------------------------
 
 def _venv_python() -> Path:
     if platform.system() == "Windows":
@@ -131,241 +174,471 @@ def _venv_python() -> Path:
     return VENV_DIR / "bin" / "python"
 
 
-def _venv_pip() -> Path:
-    if platform.system() == "Windows":
-        return VENV_DIR / "Scripts" / "pip.exe"
-    return VENV_DIR / "bin" / "pip"
-
-
-def _run(cmd: list[str | Path], **kwargs) -> int:
-    """Run a subprocess, stream output, return the exit code."""
+def _run(cmd: list[str], *, cwd: Path | None = None, check: bool = False,
+         capture: bool = False) -> tuple[int, str]:
+    """Run a subprocess. Stream by default; capture if asked."""
     cmd_str = " ".join(str(c) for c in cmd)
-    print(f"    $ {cmd_str}")
-    result = subprocess.run(cmd, **kwargs)
-    return result.returncode
+    print(f"    {DIM}$ {cmd_str}{RESET}")
+    _log(f"$ {cmd_str}")
+    if capture:
+        proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None,
+                              text=True, capture_output=True)
+        _log(proc.stdout)
+        if proc.stderr:
+            _log(f"[stderr]\n{proc.stderr}")
+        if check and proc.returncode != 0:
+            _err(f"command failed (exit {proc.returncode}): {cmd_str}")
+            sys.exit(proc.returncode)
+        return proc.returncode, proc.stdout
+    proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None)
+    if check and proc.returncode != 0:
+        _err(f"command failed (exit {proc.returncode}): {cmd_str}")
+        sys.exit(proc.returncode)
+    return proc.returncode, ""
 
 
-# ----- step implementations
+# ----------------------------------------------------------------------
+# Bootstrap state machine
+# ----------------------------------------------------------------------
+
+def _state_load() -> dict:
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            _warn(f"State file {STATE_FILE.name} is corrupted; starting fresh.")
+    return {"version": 1, "stages": {}}
 
 
-def step_check_python() -> None:
-    _print_step(1, 7, "Verify Python version")
+def _state_save(state: dict) -> None:
+    state["last_updated"] = datetime.now(timezone.utc).isoformat()
+    if "started_at" not in state:
+        state["started_at"] = state["last_updated"]
+    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _state_set(state: dict, stage: str, status: str) -> None:
+    state["stages"][stage] = status
+    _state_save(state)
+
+
+# ----------------------------------------------------------------------
+# Preflight checks
+# ----------------------------------------------------------------------
+
+def _check_python() -> tuple[bool, str]:
     major, minor = sys.version_info[:2]
-    _info(f"Detected Python {major}.{minor}.{sys.version_info.micro} on {platform.system()}")
-    if (major, minor) < (MIN_PY_MAJOR, MIN_PY_MINOR):
-        _err(
-            f"Python {MIN_PY_MAJOR}.{MIN_PY_MINOR}+ is required. "
-            f"Found {major}.{minor}. "
-            f"Install a newer Python from https://www.python.org/downloads/ and re-run."
-        )
+    label = f"Python {major}.{minor}.{sys.version_info.micro}"
+    if (major, minor) < PY_MIN:
+        return False, (f"{label} is too old. Need {PY_MIN[0]}.{PY_MIN[1]} or newer; "
+                       f"install from python.org or pyenv and re-run.")
+    if (major, minor) > PY_MAX:
+        return False, (f"{label} is newer than tested. Need <= "
+                       f"{PY_MAX[0]}.{PY_MAX[1]}. Some wheels may not exist yet; "
+                       f"install Python {PY_MAX[0]}.{PY_MAX[1]} or earlier.")
+    return True, f"{label} on {platform.system()} {platform.release()}"
+
+
+def _check_pip() -> tuple[bool, str]:
+    """Verify pip is reachable; try ensurepip if not."""
+    code, _ = _run([sys.executable, "-m", "pip", "--version"], capture=True)
+    if code == 0:
+        return True, "pip is available"
+    _warn("pip not found; attempting ensurepip --upgrade")
+    code, _ = _run([sys.executable, "-m", "ensurepip", "--upgrade"], capture=True)
+    if code != 0:
+        return False, ("pip is unavailable and ensurepip failed. Reinstall Python "
+                       "with the 'pip' option enabled, or run "
+                       "`python -m ensurepip --upgrade` manually.")
+    return True, "pip installed via ensurepip"
+
+
+def _check_git() -> tuple[bool, str]:
+    if not shutil.which("git"):
+        return False, "git not on PATH (needed only for cloning; ignore on local checkouts)"
+    code, out = _run(["git", "--version"], capture=True)
+    return code == 0, out.strip() or "git unknown"
+
+
+def _check_disk(path: Path = PROJECT_DIR) -> tuple[bool, str]:
+    usage = shutil.disk_usage(path)
+    free_gb = usage.free / (1024 ** 3)
+    msg = f"{free_gb:.1f} GB free on the project partition"
+    if free_gb < MIN_DISK_GB:
+        return False, msg + f" (recommend >= {MIN_DISK_GB} GB before running the pipeline)"
+    return True, msg
+
+
+def _check_network(host: str = "www.histdata.com", timeout: float = 3.0) -> tuple[bool, str]:
+    try:
+        socket.gethostbyname(host)
+    except OSError as exc:
+        return False, f"DNS lookup failed for {host}: {exc}"
+    try:
+        with urllib.request.urlopen(f"https://{host}", timeout=timeout) as resp:
+            return True, f"{host} reachable (HTTP {resp.status})"
+    except Exception as exc:
+        return False, f"{host} not reachable: {exc.__class__.__name__}"
+
+
+def _detect_cuda() -> tuple[str, str]:
+    """Return (variant, detail). variant is one of 'cu121', 'cpu', 'mps'."""
+    if platform.system() == "Darwin":
+        return "cpu", "macOS detected; using CPU torch (MPS works at runtime)"
+    if shutil.which("nvidia-smi"):
+        code, out = _run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                         capture=True)
+        if code == 0 and out.strip():
+            return "cu121", f"GPU(s) detected: {out.strip().splitlines()[0]}"
+    return "cpu", "no NVIDIA GPU detected; using CPU torch"
+
+
+def _stage_already_done(stage: str) -> bool:
+    """Idempotency: return True if the stage's outputs are already on disk."""
+    if stage == "download":
+        files = list((PROJECT_DIR / "data" / "parquet").glob("*.parquet"))
+        return len(files) >= len(PAIRS)
+    if stage == "clean":
+        d = PROJECT_DIR / "data" / "processed" / "cleaned"
+        return d.exists() and len(list(d.glob("*_clean.parquet"))) >= len(PAIRS)
+    if stage == "features":
+        d = PROJECT_DIR / "features" / "pair"
+        return d.exists() and len(list(d.glob("*.parquet"))) >= len(PAIRS)
+    if stage == "labels":
+        d = PROJECT_DIR / "labels" / "pair"
+        return d.exists() and len(list(d.glob("*.parquet"))) >= len(PAIRS)
+    if stage == "split":
+        test_d = PROJECT_DIR / "datasets" / "test"
+        scal_d = PROJECT_DIR / "scalers"
+        return (test_d.exists()
+                and len(list(test_d.glob("*.parquet"))) >= len(PAIRS)
+                and len(list(scal_d.glob("*_scaler.pkl"))) >= len(PAIRS))
+    if stage == "train":
+        for pair in PAIRS:
+            for path in (PROJECT_DIR / "models" / "global" / f"{pair}_logreg_model.pkl",
+                         PROJECT_DIR / "models" / "global" / f"{pair}_lstm_model.pt"):
+                if not path.exists():
+                    return False
+            for sess in SESSIONS_NON_GLOBAL:
+                for path in (PROJECT_DIR / "models" / "session" / sess / f"{pair}_logreg_model.pkl",
+                             PROJECT_DIR / "models" / "session" / sess / f"{pair}_lstm_model.pt"):
+                    if not path.exists():
+                        return False
+        return True
+    return False
+
+
+# ----------------------------------------------------------------------
+# Steps
+# ----------------------------------------------------------------------
+
+def step_doctor() -> int:
+    _print_header("Diagnostic report")
+    rows = []
+    ok_py, msg_py = _check_python();         rows.append(("Python", ok_py, msg_py))
+    ok_pip, msg_pip = _check_pip();          rows.append(("pip",    ok_pip, msg_pip))
+    ok_git, msg_git = _check_git();          rows.append(("git",    ok_git, msg_git))
+    ok_disk, msg_disk = _check_disk();       rows.append(("disk",   ok_disk, msg_disk))
+    ok_net, msg_net = _check_network();      rows.append(("net",    ok_net, msg_net))
+    cuda_variant, msg_cuda = _detect_cuda(); rows.append(("torch",  True, f"{cuda_variant}: {msg_cuda}"))
+    print()
+    for label, ok, msg in rows:
+        glyph = f"{GREEN}OK  {RESET}" if ok else f"{YELLOW}WARN{RESET}"
+        print(f"  {glyph} {label:<8} {msg}")
+    print()
+    print(f"  Project root: {PROJECT_DIR}")
+    print(f"  venv path:    {VENV_DIR}  (exists: {VENV_DIR.exists()})")
+    for stage in ALL_STAGE_NAMES:
+        done = _stage_already_done(stage)
+        glyph = f"{GREEN}done   {RESET}" if done else f"{DIM}pending{RESET}"
+        print(f"  stage {stage:<10} {glyph}")
+    print()
+    return 0
+
+
+def step_preflight(args: argparse.Namespace) -> None:
+    _print_step(1, 10, "Preflight checks")
+    fatal = False
+    ok, msg = _check_python();   (_ok if ok else _err)(f"Python: {msg}");   fatal |= not ok
+    ok, msg = _check_pip();      (_ok if ok else _err)(f"pip:    {msg}");   fatal |= not ok
+    ok, msg = _check_disk();     (_ok if ok else _warn)(f"disk:   {msg}")
+    ok, msg = _check_git();      (_ok if ok else _warn)(f"git:    {msg}")
+    if not args.offline:
+        ok, msg = _check_network(); (_ok if ok else _warn)(f"net:    {msg}")
+    if fatal:
+        _err("Preflight has a blocking error. Resolve and re-run.")
         sys.exit(1)
-    if major == MIN_PY_MAJOR and minor > MAX_PY_MINOR:
-        _err(
-            f"Python {MIN_PY_MAJOR}.{minor} is too new for the pinned dependency set.\n"
-            f"  The current pin requires Python {MIN_PY_MAJOR}.{MIN_PY_MINOR} or "
-            f"{MIN_PY_MAJOR}.{MAX_PY_MINOR}, because torch==2.6.0 does not yet ship "
-            f"wheels for cp{MIN_PY_MAJOR}{minor}.\n"
-            f"  Install Python {MIN_PY_MAJOR}.{MAX_PY_MINOR} from "
-            f"https://www.python.org/downloads/ and re-run, or set up a fresh venv "
-            f"with a 3.{MAX_PY_MINOR} interpreter (e.g. via pyenv or conda)."
-        )
-        sys.exit(1)
-    _ok(f"Python {major}.{minor} is in the supported range "
-        f"({MIN_PY_MAJOR}.{MIN_PY_MINOR} to {MIN_PY_MAJOR}.{MAX_PY_MINOR})")
 
 
-def step_create_venv(reuse: bool = True) -> None:
-    _print_step(2, 7, "Create virtual environment")
-    if VENV_DIR.exists():
-        if reuse:
-            _ok(f"Reusing existing venv at {VENV_DIR}")
-            return
-        _info(f"Removing stale venv at {VENV_DIR}")
-        shutil.rmtree(VENV_DIR)
-    _info(f"Creating venv at {VENV_DIR}")
-    rc = _run([sys.executable, "-m", "venv", str(VENV_DIR)])
-    if rc != 0:
-        _err(f"venv creation failed with exit code {rc}")
-        sys.exit(rc)
-    if not _venv_python().exists():
-        _err(f"venv created but interpreter not found at {_venv_python()}")
-        sys.exit(1)
-    _ok(f"venv ready: {VENV_DIR}")
+def step_venv(args: argparse.Namespace) -> None:
+    _print_step(2, 10, "Virtual environment")
+    if VENV_DIR.exists() and not args.rebuild_venv:
+        _ok(f"Reusing existing venv at {VENV_DIR}")
+    else:
+        if VENV_DIR.exists():
+            _info(f"Removing existing venv at {VENV_DIR}")
+            shutil.rmtree(VENV_DIR)
+        _info(f"Creating venv at {VENV_DIR}")
+        _run([sys.executable, "-m", "venv", str(VENV_DIR)], check=True)
+        if not _venv_python().exists():
+            _err(f"venv interpreter missing at {_venv_python()}")
+            sys.exit(1)
+        _ok(f"venv ready: {VENV_DIR}")
+    _info("Upgrading pip, setuptools, wheel")
+    _run([str(_venv_python()), "-m", "pip", "install", "--upgrade",
+          "pip", "setuptools", "wheel"], check=True)
+    _ok("pip toolchain upgraded")
 
 
-def step_upgrade_pip() -> None:
-    _print_step(3, 7, "Upgrade pip, setuptools, and wheel")
-    rc = _run([str(_venv_python()), "-m", "pip", "install",
-               "--upgrade", "pip", "setuptools", "wheel"])
-    if rc != 0:
-        _err("pip upgrade failed; you can try again or continue manually.")
-        sys.exit(rc)
-    _ok("pip, setuptools, wheel upgraded")
+def step_install_torch(args: argparse.Namespace) -> str:
+    _print_step(3, 10, "Install torch (wheel selection)")
+    if args.offline:
+        _warn("--offline set; skipping torch install. Existing torch in venv will be used.")
+        return "offline"
+    if args.cpu:
+        variant, detail = "cpu", "forced via --cpu"
+    elif args.gpu:
+        variant, detail = "cu121", "forced via --gpu"
+    else:
+        variant, detail = _detect_cuda()
+    _info(f"torch variant: {variant} ({detail})")
+    cmd = [str(_venv_python()), "-m", "pip", "install", "--upgrade", "torch"]
+    if variant == "cu121":
+        cmd += ["--index-url", CUDA_INDEX_URL]
+    _run(cmd, check=True)
+    _ok(f"torch installed ({variant})")
+    return variant
 
 
-def step_install_requirements() -> None:
-    _print_step(4, 7, "Install runtime dependencies")
-    if not REQUIREMENTS.exists():
-        _err(f"requirements.txt not found at {REQUIREMENTS}")
-        sys.exit(1)
-    _info(f"Installing from {REQUIREMENTS.name}")
-    rc = _run([str(_venv_python()), "-m", "pip", "install",
-               "-r", str(REQUIREMENTS)])
-    if rc != 0:
-        _err("Dependency install failed.")
-        sys.exit(rc)
-    _ok("All runtime dependencies installed")
+def step_install_deps(args: argparse.Namespace) -> None:
+    _print_step(4, 10, "Install core + extras")
+    if not REQUIREMENTS_CORE.exists():
+        _err(f"{REQUIREMENTS_CORE.name} missing"); sys.exit(1)
+    _run([str(_venv_python()), "-m", "pip", "install", "-r", str(REQUIREMENTS_CORE)],
+         check=True)
+    _ok(f"installed {REQUIREMENTS_CORE.name}")
+    if REQUIREMENTS_EXTRAS.exists():
+        _run([str(_venv_python()), "-m", "pip", "install", "-r", str(REQUIREMENTS_EXTRAS)],
+             check=True)
+        _ok(f"installed {REQUIREMENTS_EXTRAS.name}")
+    if args.with_pdf:
+        _info("Installing playwright + chromium for PDF export")
+        _run([str(_venv_python()), "-m", "pip", "install", "playwright~=1.45"], check=True)
+        _run([str(_venv_python()), "-m", "playwright", "install", "chromium"], check=True)
+        _ok("playwright + chromium ready")
+    _info("Writing requirements.lock.txt (pip freeze)")
+    code, out = _run([str(_venv_python()), "-m", "pip", "freeze"], capture=True)
+    if code == 0 and out:
+        REQUIREMENTS_LOCK.write_text(out, encoding="utf-8")
+        _ok(f"lockfile written: {REQUIREMENTS_LOCK.name}")
 
 
-def step_run_tests() -> None:
-    _print_step(5, 7, "Verify install with pytest")
-    rc = _run([str(_venv_python()), "-m", "pytest", "tests/", "-q"],
-              cwd=str(PROJECT_DIR))
-    if rc != 0:
-        _err("Tests failed. The environment is installed but verification did not pass.")
-        _err("Investigate before running the pipeline or training.")
+def step_env(args: argparse.Namespace) -> str:
+    _print_step(5, 10, "Configuration (.env)")
+    if ENV_FILE.exists():
+        _ok(f"{ENV_FILE.name} already present (not touched)")
+        return "kept"
+    if not ENV_EXAMPLE.exists():
+        _warn(f"{ENV_EXAMPLE.name} missing; cannot bootstrap .env")
+        return "missing-example"
+    shutil.copy(ENV_EXAMPLE, ENV_FILE)
+    _ok(f"created {ENV_FILE.name} from {ENV_EXAMPLE.name}")
+    return "created"
+
+
+def step_tests(args: argparse.Namespace) -> bool:
+    _print_step(6, 10, "Verify with pytest")
+    if args.no_tests:
+        _skip("--no-tests set; skipping verification")
+        return True
+    code, _ = _run([str(_venv_python()), "-m", "pytest", "tests/", "-q"],
+                   cwd=PROJECT_DIR)
+    if code != 0:
+        _err("pytest reported failures. Environment installed; verification did not pass.")
+        return False
+    _ok("pytest green")
+    return True
+
+
+def step_pipeline(args: argparse.Namespace, state: dict) -> None:
+    _print_step(7, 10, "Data pipeline (stages 1-5)")
+    if args.minimal:
+        _skip("--minimal set; skipping pipeline")
         return
-    _ok("All tests pass")
-
-
-def step_run_pipeline(assume_yes: bool, skip: bool) -> None:
-    _print_step(6, 7, "Run data pipeline (stages 1-5)")
-    if skip:
-        _info("Skipped via --no-pipeline.")
+    if not _confirm("Run the data pipeline now? (90 min - 3 h)", assume_yes=args.yes):
+        _skip("user declined")
         return
+    for name, script, desc in PIPELINE_STAGES:
+        if name in args.force_stage:
+            _info(f"--force-stage {name}: re-running even if outputs exist")
+        elif args.resume and state["stages"].get(name) == "ok":
+            _skip(f"{name}: marked ok in resume state"); continue
+        elif _stage_already_done(name):
+            _skip(f"{name}: outputs already on disk")
+            _state_set(state, name, "ok"); continue
+        _info(f"Running {name}: {desc}")
+        _state_set(state, name, "running")
+        code, _ = _run([str(_venv_python()), script], cwd=PROJECT_DIR)
+        if code != 0:
+            _state_set(state, name, "failed")
+            _err(f"Stage {name} failed (exit {code}).")
+            _err(f"Re-run with: python bootstrap.py --resume   (or fix and re-run: python {script})")
+            sys.exit(code)
+        _state_set(state, name, "ok")
+        _ok(f"{name} complete")
+
+
+def step_train(args: argparse.Namespace, state: dict) -> None:
+    _print_step(8, 10, "Train model grid")
+    if args.minimal:
+        _skip("--minimal set; skipping training")
+        return
+    if "train" in args.force_stage:
+        _info("--force-stage train: re-running full grid")
+    elif args.resume and state["stages"].get("train") == "ok":
+        _skip("train: marked ok in resume state"); return
+    elif _stage_already_done("train"):
+        _skip("train: all 56 checkpoints present")
+        _state_set(state, "train", "ok"); return
     print()
     print(textwrap.dedent("""\
-          The data pipeline downloads ~10 years of minute-level FX data for 7 pairs,
-          cleans it, computes features, builds labels, and writes train/val/test
-          splits. Total runtime is roughly 90 minutes to 3 hours on a recent laptop.
-          The largest stage is feature computation (45 to 90 minutes).
-
-          The pipeline is one-time: subsequent runs read from on-disk Parquets.
+          Training fits 28 LR + 28 LSTM cells across 7 pairs and 4 sessions.
+          LR cells under 5 min each; LSTM cells 40-90 min each. Total runtime
+          is 8-14 hours unattended on CPU; faster on GPU.
         """))
-    if not _confirm("  Run the data pipeline now?", assume_yes=assume_yes):
-        _info("Skipped. Run individual stages later with the commands in docs/SETUP.md.")
-        return
-    for i, (name, script, eta) in enumerate(PIPELINE_STAGES, start=1):
-        print()
-        _info(f"Stage {i}/5: {name} ({eta})")
-        rc = _run([str(_venv_python()), script], cwd=str(PROJECT_DIR))
-        if rc != 0:
-            _err(f"Stage {name} failed with exit code {rc}.")
-            _err(f"Fix the issue and re-run: python {script}")
-            sys.exit(rc)
-        _ok(f"Stage {name} complete")
-    _ok("Data pipeline complete")
+    if not _confirm("Train the full grid now?", assume_yes=args.yes):
+        _skip("user declined"); return
+    _state_set(state, "train", "running")
+    code, _ = _run([str(_venv_python()), "scripts/train_all.py", "--model-type", "all"],
+                   cwd=PROJECT_DIR)
+    if code != 0:
+        _state_set(state, "train", "failed")
+        _err(f"Training failed (exit {code}). Re-run with: python bootstrap.py --resume")
+        sys.exit(code)
+    _state_set(state, "train", "ok")
+    _ok("model grid complete")
 
 
-def step_train_models(assume_yes: bool, skip: bool) -> None:
-    _print_step(7, 7, "Train model cells")
-    if skip:
-        _info("Skipped via --no-train.")
-        return
+def step_summary(results: dict) -> None:
+    _print_header("Bootstrap summary")
     print()
-    print(textwrap.dedent("""\
-          Training fits every cell in the LR x LSTM grid: 7 pairs x 4 sessions x
-          2 model types = 56 checkpoints. LR cells are fast (under 5 min each).
-          LSTM cells are slow (40 to 90 min each). Total grid time is roughly
-          8 to 14 hours unattended.
-
-          Training is one-time per cell: re-runs only happen if features or
-          labels change.
-        """))
-    if not _confirm("  Train the full model grid now?", assume_yes=assume_yes):
-        _info("Skipped. Train individual cells later with scripts/train_model.py")
-        _info("or the full grid with scripts/train_all.py.")
-        return
-    rc = _run([str(_venv_python()), "scripts/train_all.py"],
-              cwd=str(PROJECT_DIR))
-    if rc != 0:
-        _err(f"Training failed with exit code {rc}.")
-        sys.exit(rc)
-    _ok("Model grid complete")
-
-
-def print_next_steps() -> None:
-    _print_header("Setup complete")
-    venv_activate = (
-        "venv\\Scripts\\activate" if platform.system() == "Windows"
-        else "source venv/bin/activate"
-    )
+    print(f"  {'Step':<28} {'Result':<14} {'Time':>8}")
+    print(f"  {'-' * 28} {'-' * 14} {'-' * 8}")
+    for name, (result, secs) in results.items():
+        color = GREEN if result == "ok" else (DIM if result == "skip" else RED)
+        t = f"{secs:>7.1f}s" if secs is not None else "       -"
+        print(f"  {name:<28} {color}{result:<14}{RESET} {t}")
     print()
-    print("  Activate the environment in your shell:")
-    print(f"      {venv_activate}")
+    activate = ("venv\\Scripts\\activate" if platform.system() == "Windows"
+                else "source venv/bin/activate")
+    print("  Activate the venv in your shell:")
+    print(f"      {activate}")
     print()
     print("  Run the master evaluation on 2024:")
     print("      python scripts/master_eval.py --eval-year 2024 --spreads 1.0")
     print()
-    print("  Run a single backtest:")
-    print("      python backtest/run_backtest.py --pair EURUSD --strategy RSI_p14_os30_ob70 --split full --no-browser")
-    print()
-    print("  Documentation:")
-    print("      README.md         project overview")
-    print("      docs/SETUP.md     full setup and CLI reference")
-    print("      ARCHITECTURE.md   system internals and decision records")
-    print("      docs/EXPERIMENTS.md   experimental framework and reproducibility")
+    print("  Single backtest sanity check:")
+    print("      python backtest/run_backtest.py --pair EURUSD \\")
+    print("          --strategy RSI_p14_os30_ob70 --split full --capital 10000 --no-browser")
     print()
 
+
+# ----------------------------------------------------------------------
+# Argument parsing and main
+# ----------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="One-step bootstrap for forex-algo-trading.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
-            Without flags the script runs interactively, prompting before the
-            long-running pipeline and training steps.
-
-            Use --yes to accept all prompts. Use --no-pipeline or --no-train
-            to skip the long-running steps explicitly.
+            Common invocations:
+              python bootstrap.py --doctor      diagnostic report only
+              python bootstrap.py --minimal     env only, no pipeline or training
+              python bootstrap.py --yes         unattended full setup
+              python bootstrap.py --resume      continue from last failed stage
         """),
     )
-    parser.add_argument(
-        "--yes", "-y", action="store_true",
-        help="Accept all prompts (run pipeline and training without asking).",
-    )
-    parser.add_argument(
-        "--no-pipeline", action="store_true",
-        help="Skip the data pipeline (stages 1-5).",
-    )
-    parser.add_argument(
-        "--no-train", action="store_true",
-        help="Skip model training.",
-    )
-    parser.add_argument(
-        "--no-tests", action="store_true",
-        help="Skip the pytest verification step.",
-    )
-    parser.add_argument(
-        "--rebuild-venv", action="store_true",
-        help="Delete and recreate the venv even if it already exists.",
-    )
-    return parser.parse_args()
+    parser.add_argument("--yes", "-y", action="store_true",
+                        help="Accept all prompts.")
+    parser.add_argument("--minimal", action="store_true",
+                        help="Skip the data pipeline and the training grid.")
+    parser.add_argument("--with-pdf", action="store_true",
+                        help="Also install playwright + chromium for PDF export.")
+    parser.add_argument("--cpu", action="store_true",
+                        help="Force CPU torch wheel.")
+    parser.add_argument("--gpu", action="store_true",
+                        help="Force CUDA (cu121) torch wheel.")
+    parser.add_argument("--rebuild-venv", action="store_true",
+                        help="Delete and recreate the venv.")
+    parser.add_argument("--offline", action="store_true",
+                        help="Skip network operations.")
+    parser.add_argument("--no-tests", action="store_true",
+                        help="Skip the pytest verification step.")
+    parser.add_argument("--resume", action="store_true",
+                        help="Continue from the last unfinished stage.")
+    parser.add_argument("--force-stage", action="append", default=[],
+                        metavar="NAME", choices=ALL_STAGE_NAMES,
+                        help=f"Re-run one stage by name. Repeatable. "
+                             f"Names: {', '.join(ALL_STAGE_NAMES)}.")
+    parser.add_argument("--doctor", action="store_true",
+                        help="Print diagnostic report and exit.")
+    parser.add_argument("--log", default=str(LOG_FILE_DEFAULT),
+                        metavar="PATH", help="Log file path.")
+    args = parser.parse_args()
+    if args.cpu and args.gpu:
+        parser.error("--cpu and --gpu are mutually exclusive")
+    return args
 
 
 def main() -> None:
     args = parse_args()
+    _log_open(Path(args.log))
+
+    if args.doctor:
+        sys.exit(step_doctor())
 
     _print_header("forex-algo-trading bootstrap")
     print()
     print(f"  Project root : {PROJECT_DIR}")
     print(f"  venv path    : {VENV_DIR}")
-    print(f"  Requirements : {REQUIREMENTS}")
+    print(f"  Log file     : {args.log}")
     print(f"  Platform     : {platform.system()} {platform.release()}")
+    if args.resume:
+        print(f"  Resume mode  : reading {STATE_FILE.name}")
     print()
 
-    step_check_python()
-    step_create_venv(reuse=not args.rebuild_venv)
-    step_upgrade_pip()
-    step_install_requirements()
+    state = _state_load()
+    results: dict[str, tuple[str, float | None]] = {}
 
-    if not args.no_tests:
-        step_run_tests()
+    def time_step(name: str, fn, *fn_args) -> None:
+        t0 = time.time()
+        try:
+            fn(*fn_args)
+            results[name] = ("ok", time.time() - t0)
+            _state_set(state, name, "ok")
+        except SystemExit:
+            results[name] = ("FAIL", time.time() - t0)
+            _state_save(state)
+            raise
 
-    step_run_pipeline(assume_yes=args.yes, skip=args.no_pipeline)
-    step_train_models(assume_yes=args.yes, skip=args.no_train)
+    time_step("preflight",   step_preflight, args)
+    time_step("venv",        step_venv, args)
+    time_step("torch wheel", step_install_torch, args)
+    time_step("deps",        step_install_deps, args)
+    time_step("env",         step_env, args)
+    t0 = time.time()
+    tests_passed = step_tests(args)
+    results["tests"] = ("ok" if tests_passed else "FAIL", time.time() - t0)
+    _state_set(state, "tests", "ok" if tests_passed else "failed")
+    t0 = time.time()
+    step_pipeline(args, state)
+    results["pipeline"] = ("skip" if args.minimal else "ok", time.time() - t0)
+    t0 = time.time()
+    step_train(args, state)
+    results["training"] = ("skip" if args.minimal else "ok", time.time() - t0)
 
-    print_next_steps()
+    step_summary(results)
 
 
 if __name__ == "__main__":

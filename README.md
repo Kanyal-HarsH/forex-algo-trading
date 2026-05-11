@@ -36,17 +36,16 @@ The README from here on is a snapshot: motivation, demo screenshots, headline nu
 The fastest path is a single bootstrap command. Run from the project root:
 
 ```bash
-python bootstrap.py --no-pipeline --no-train
+python bootstrap.py --minimal
 ```
 
 Flags used above:
 
-- `--no-pipeline`: skip the multi-hour data download and feature build.
-- `--no-train`: skip the multi-hour LR + LSTM training grid.
+- `--minimal`: install the environment only; skip the multi-hour data pipeline and the multi-hour LR + LSTM training grid.
 
-That single command verifies that Python is 3.11 or 3.12, creates `./venv`, upgrades pip, and installs every pinned dependency from `requirements.txt`. Drop both flags to run the full pipeline end to end. Pass `--yes` to accept all prompts unattended.
+Under the hood, the script checks that Python is in 3.10 through 3.13, that pip is reachable, that disk and network look healthy, and then creates `./venv`. It picks the CPU torch wheel by default and switches to CUDA when `nvidia-smi` is on `PATH`; `--cpu` and `--gpu` override the autodetect. After installing `requirements-core.txt` and `requirements-extras.txt` it captures the resolved environment in `requirements.lock.txt`, copies `.env.example` to `.env` if `.env` is absent, and runs `pytest tests/ -q`.
 
-Python 3.13 is rejected by the version check on purpose: the pinned `torch==2.6.0` does not yet ship cp313 wheels, so the install step would fail later with a less informative error. Install Python 3.11 or 3.12 (e.g. via pyenv or python.org) and re-run.
+To run the full pipeline plus training without prompts, drop `--minimal` and add `--yes`. After a stage failure, re-run with `--resume` to continue from the first unfinished step. For a diagnostics-only report that performs no installs, pass `--doctor`.
 
 Once the script finishes, activate the environment:
 
@@ -73,7 +72,7 @@ The console prints `Report written: backtest/reports/report_EURUSD_RSI_p14_os30_
 
 Notes from a fresh-clone replication pass. Each item lists the symptom, the root cause, and the fix that landed in the codebase.
 
-- **`torch==2.6.0` will not install on Python 3.13.** The pinned wheel only exists for cp311 and cp312 at the time of writing. `bootstrap.py` rejects 3.13 up-front with a clear error message. Install Python 3.11 or 3.12 and re-run.
+- **Pinning to the newest releases broke fresh clones.** The earlier `requirements.txt` pinned `pandas==3.0.1`, `numpy==2.4.3`, and `torch==2.6.0`. None of those versions resolved cleanly on every host at the time of writing, and the `torch` pin had no cp313 wheel at all. The current setup splits the requirements into `requirements-core.txt` and `requirements-extras.txt` with compatible-release pins (`pandas~=2.2`, `numpy~=1.26`, `torch>=2.2,<2.7`), which install cleanly on Python 3.10 through 3.13. For exact reproducibility within a given environment, `bootstrap.py` writes `requirements.lock.txt` from `pip freeze` after a clean install.
 - **`scripts/download_fx_data.py` fails with a TLS verification error.** histdata.com has occasionally served an expired or untrusted certificate. The downloader now accepts `--insecure`, which sets `verify=False` on the HTTP session and prints a one-line warning so the relaxation is auditable. Use it only as long as the upstream certificate is broken; remove the flag once the site recovers. The seven cleaned parquets ship in-tree under `data/parquet/`, so most users can skip stage 1 entirely.
 - **`LSTM_global` (or any LSTM cell) produces no signals or a silent all-FLAT output.** The LSTM long branch reads features such as `rv_ratio_10_60` and `same_minute_prev_day_logrange` that live outside the LR scaler's `feature_cols`. If the test parquet was copied from an older clone, those columns are absent and the older code substituted zeros without complaint. The MLStrategy preflight now raises a clear `KeyError` listing the missing columns and pointing the user back at `scripts/features_fx_data.py` and `scripts/split_fx_data.py`. Do not copy `data/`, `features/`, `labels/`, or `datasets/` between clones; regenerate them via the seven-stage pipeline.
 - **`StandardScaler` files missing from `scalers/`.** `models/` and `scalers/` ship as empty directories via `.gitkeep`. To fit and write the per-pair scalers without rerunning the upstream stages, run `python scripts/split_fx_data.py`. The script writes one `scalers/{PAIR}_scaler.pkl` per pair as a dict `{"scaler": StandardScaler, "feature_cols": [...]}`.
