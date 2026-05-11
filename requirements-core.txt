@@ -1,18 +1,4 @@
-# forex-algo-trading core runtime dependencies.
-#
-# Pinning rule: range pins (>=lower,<next_major). Lower bound is the oldest
-# version we know works against the codebase. Upper bound is just below the
-# next major release so a future ABI break doesn't silently land in a fresh
-# clone. Concrete versions land in requirements.lock.txt after a successful
-# bootstrap install.
-#
-# Two pins matter for Python 3.13 + macOS arm64 wheel availability:
-#
-#   pyarrow   needs >= 17.0 (16.x has no cp313 wheels for darwin-arm64 and
-#             building from source fails on setuptools >= 81 because the
-#             build script imports pkg_resources, which was removed).
-#   torch     needs >= 2.6 for cp313 wheels on every platform. 2.6 through
-#             the current 2.x line all install cleanly.
+# Core runtime deps. Range pins: lower = oldest tested, upper = below next major. Lockfile is requirements.lock.txt after bootstrap.
 
 # Data manipulation and IO
 pandas>=2.2,<3.0
@@ -23,7 +9,7 @@ pyarrow>=17.0,<22.0
 scikit-learn>=1.5,<2.0
 
 # Machine learning - deep
-torch>=2.6,<3.0
+torch>=2.2,<3.0
 
 # Statistics
 scipy>=1.13,<2.0

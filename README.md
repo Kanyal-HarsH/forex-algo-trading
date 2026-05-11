@@ -68,11 +68,28 @@ python backtest/run_backtest.py --pair EURUSD --strategy RSI_p14_os30_ob70 --spl
 
 The console prints `Report written: backtest/reports/report_EURUSD_RSI_p14_os30_ob70_<timestamp>.html` on success. Open the HTML file in any modern browser for the equity curve, drawdown trajectory, rolling Sharpe panel, signal distribution, and full trade ledger. A pre-generated sample report sits at [docs/assets/sample_report.html](docs/assets/sample_report.html).
 
+## Supported platforms
+
+The pins cover every OS, CPU arch, and Python interpreter that PyTorch ships a wheel for. Two combinations sit outside that envelope; `bootstrap.py` flags them in preflight.
+
+| OS | Architecture | Python 3.10 | 3.11 | 3.12 | 3.13 |
+|----|--------------|:----:|:----:|:----:|:----:|
+| macOS | arm64 (Apple Silicon) | yes | yes | yes | yes |
+| macOS | x86_64 (Intel) | yes (torch 2.2) | yes (torch 2.2) | yes (torch 2.2) | no PyTorch wheel |
+| Windows | x86_64 | yes | yes | yes | yes |
+| Windows | arm64 | no PyTorch wheel | no PyTorch wheel | no PyTorch wheel | no PyTorch wheel |
+| Linux | x86_64 | yes | yes | yes | yes |
+| Linux | aarch64 | yes | yes | yes | yes |
+
+Intel Macs land on `torch==2.2.x`, since PyTorch dropped macOS x86_64 builds at 2.3. The project pulls only basic torch features (LSTM, Linear, Dropout, CrossEntropy, Adam, and `torch.compile`) that have been stable since 2.0, so the older release runs the same code.
+
+Windows ARM64 (Surface Pro X and similar) has no PyTorch wheel at all. Run the project under x86_64 emulation or move to a different machine.
+
 ## Known replication gotchas
 
 Notes from a fresh-clone replication pass. Each item lists the symptom, the root cause, and the fix that landed in the codebase.
 
-- **Pinning to the newest releases broke fresh clones.** The earlier `requirements.txt` pinned `pandas==3.0.1`, `numpy==2.4.3`, and `torch==2.6.0`. None of those versions resolved cleanly on every host at the time of writing, and the `torch` pin had no cp313 wheel at all. The current setup splits the requirements into `requirements-core.txt` and `requirements-extras.txt` with compatible-release pins (`pandas~=2.2`, `numpy~=1.26`, `torch>=2.2,<2.7`), which install cleanly on Python 3.10 through 3.13. For exact reproducibility within a given environment, `bootstrap.py` writes `requirements.lock.txt` from `pip freeze` after a clean install.
+- **Pinning to the newest releases broke fresh clones.** The earlier `requirements.txt` pinned `pandas==3.0.1`, `numpy==2.4.3`, and `torch==2.6.0`. None of those versions resolved cleanly on every host at the time of writing, and the `torch` pin had no cp313 wheel at all. The split files now use range pins (`pandas>=2.2,<3.0`, `numpy>=1.26,<3.0`, `pyarrow>=17.0,<22.0`, `torch>=2.2,<3.0`), with lower bounds at the oldest tested release and upper bounds just below the next major. Wheel availability drives the pin width, not test-machine quirks. `bootstrap.py` writes `requirements.lock.txt` from `pip freeze` after a clean install for exact replay.
 - **`scripts/download_fx_data.py` fails with a TLS verification error.** histdata.com has occasionally served an expired or untrusted certificate. The downloader now accepts `--insecure`, which sets `verify=False` on the HTTP session and prints a one-line warning so the relaxation is auditable. Use it only as long as the upstream certificate is broken; remove the flag once the site recovers. The seven cleaned parquets ship in-tree under `data/parquet/`, so most users can skip stage 1 entirely.
 - **`LSTM_global` (or any LSTM cell) produces no signals or a silent all-FLAT output.** The LSTM long branch reads features such as `rv_ratio_10_60` and `same_minute_prev_day_logrange` that live outside the LR scaler's `feature_cols`. If the test parquet was copied from an older clone, those columns are absent and the older code substituted zeros without complaint. The MLStrategy preflight now raises a clear `KeyError` listing the missing columns and pointing the user back at `scripts/features_fx_data.py` and `scripts/split_fx_data.py`. Do not copy `data/`, `features/`, `labels/`, or `datasets/` between clones; regenerate them via the seven-stage pipeline.
 - **`StandardScaler` files missing from `scalers/`.** `models/` and `scalers/` ship as empty directories via `.gitkeep`. To fit and write the per-pair scalers without rerunning the upstream stages, run `python scripts/split_fx_data.py`. The script writes one `scalers/{PAIR}_scaler.pkl` per pair as a dict `{"scaler": StandardScaler, "feature_cols": [...]}`.

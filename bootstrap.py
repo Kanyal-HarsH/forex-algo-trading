@@ -269,6 +269,33 @@ def _check_disk(path: Path = PROJECT_DIR) -> tuple[bool, str]:
     return True, msg
 
 
+def _check_platform_torch() -> tuple[bool, str]:
+    """Flag (OS, arch, Python) combinations PyTorch has no wheel for."""
+    system  = platform.system()
+    machine = platform.machine().lower()
+    pyver   = sys.version_info[:2]
+
+    if system == "Darwin" and machine in ("x86_64", "amd64") and pyver >= (3, 13):
+        return False, ("macOS Intel (x86_64) on Python 3.13 has no torch wheel. "
+                       "PyTorch dropped macOS x86_64 builds at 2.3 and never "
+                       "shipped cp313 for that target. Install Python 3.12 "
+                       "from python.org or pyenv and re-run, or run the project "
+                       "on an Apple Silicon Mac.")
+    if system == "Windows" and machine in ("arm64", "aarch64"):
+        return False, ("Windows on ARM64 has no torch wheel from PyTorch. "
+                       "Run the project under x86_64 emulation (Windows "
+                       "Prism/x86 emulation) or on a different machine.")
+    arch_label = {
+        ("Darwin",  "arm64"):  "macOS Apple Silicon",
+        ("Darwin",  "x86_64"): "macOS Intel",
+        ("Windows", "amd64"):  "Windows x86_64",
+        ("Windows", "x86_64"): "Windows x86_64",
+        ("Linux",   "x86_64"): "Linux x86_64",
+        ("Linux",   "aarch64"):"Linux arm64",
+    }.get((system, machine), f"{system} {machine}")
+    return True, f"{arch_label} on Python {pyver[0]}.{pyver[1]}: torch wheel available"
+
+
 def _check_network(host: str = "www.histdata.com", timeout: float = 3.0) -> tuple[bool, str]:
     try:
         socket.gethostbyname(host)
@@ -335,12 +362,13 @@ def _stage_already_done(stage: str) -> bool:
 def step_doctor() -> int:
     _print_header("Diagnostic report")
     rows = []
-    ok_py, msg_py = _check_python();         rows.append(("Python", ok_py, msg_py))
-    ok_pip, msg_pip = _check_pip();          rows.append(("pip",    ok_pip, msg_pip))
-    ok_git, msg_git = _check_git();          rows.append(("git",    ok_git, msg_git))
-    ok_disk, msg_disk = _check_disk();       rows.append(("disk",   ok_disk, msg_disk))
-    ok_net, msg_net = _check_network();      rows.append(("net",    ok_net, msg_net))
-    cuda_variant, msg_cuda = _detect_cuda(); rows.append(("torch",  True, f"{cuda_variant}: {msg_cuda}"))
+    ok_py, msg_py = _check_python();                rows.append(("Python",   ok_py, msg_py))
+    ok_pip, msg_pip = _check_pip();                 rows.append(("pip",      ok_pip, msg_pip))
+    ok_plat, msg_plat = _check_platform_torch();    rows.append(("platform", ok_plat, msg_plat))
+    ok_git, msg_git = _check_git();                 rows.append(("git",      ok_git, msg_git))
+    ok_disk, msg_disk = _check_disk();              rows.append(("disk",     ok_disk, msg_disk))
+    ok_net, msg_net = _check_network();             rows.append(("net",      ok_net, msg_net))
+    cuda_variant, msg_cuda = _detect_cuda();        rows.append(("cuda",     True, f"{cuda_variant}: {msg_cuda}"))
     print()
     for label, ok, msg in rows:
         glyph = f"{GREEN}OK  {RESET}" if ok else f"{YELLOW}WARN{RESET}"
@@ -359,12 +387,13 @@ def step_doctor() -> int:
 def step_preflight(args: argparse.Namespace) -> None:
     _print_step(1, 10, "Preflight checks")
     fatal = False
-    ok, msg = _check_python();   (_ok if ok else _err)(f"Python: {msg}");   fatal |= not ok
-    ok, msg = _check_pip();      (_ok if ok else _err)(f"pip:    {msg}");   fatal |= not ok
-    ok, msg = _check_disk();     (_ok if ok else _warn)(f"disk:   {msg}")
-    ok, msg = _check_git();      (_ok if ok else _warn)(f"git:    {msg}")
+    ok, msg = _check_python();         (_ok if ok else _err)(f"Python:   {msg}");   fatal |= not ok
+    ok, msg = _check_pip();            (_ok if ok else _err)(f"pip:      {msg}");   fatal |= not ok
+    ok, msg = _check_platform_torch(); (_ok if ok else _err)(f"platform: {msg}");   fatal |= not ok
+    ok, msg = _check_disk();           (_ok if ok else _warn)(f"disk:     {msg}")
+    ok, msg = _check_git();            (_ok if ok else _warn)(f"git:      {msg}")
     if not args.offline:
-        ok, msg = _check_network(); (_ok if ok else _warn)(f"net:    {msg}")
+        ok, msg = _check_network();    (_ok if ok else _warn)(f"net:      {msg}")
     if fatal:
         _err("Preflight has a blocking error. Resolve and re-run.")
         sys.exit(1)
@@ -388,14 +417,10 @@ def step_venv(args: argparse.Namespace) -> None:
     _run([str(_venv_python()), "-m", "pip", "install", "--upgrade", "pip"],
          check=True)
     _ok("pip upgraded")
-    # setuptools and wheel are intentionally left at whatever the venv shipped
-    # with. Pre-upgrading setuptools breaks pins like torch's `setuptools<82`
-    # constraint, and triggers a downgrade later that wastes time and confuses
-    # the install log. pip itself pulls the right setuptools as a build dep
-    # when needed.
+    # setuptools/wheel left alone: pre-upgrading conflicts with torch's setuptools<82 pin.
 
 
-TORCH_PIN = "torch>=2.6,<3.0"  # mirror requirements-core.txt
+TORCH_PIN = "torch>=2.2,<3.0"  # mirror requirements-core.txt
 
 
 def step_install_torch(args: argparse.Namespace) -> str:
@@ -411,15 +436,10 @@ def step_install_torch(args: argparse.Namespace) -> str:
         variant, detail = _detect_cuda()
     _info(f"torch variant: {variant} ({detail})")
     if variant != "cu121":
-        # CPU torch (Linux/Windows default and every macOS) is just a normal
-        # PyPI install. requirements-core.txt already pins the version, so
-        # running pip twice would either be a no-op or risk a downgrade fight.
+        # CPU torch is handled by requirements-core.txt; nothing to do here.
         _skip("CPU torch is handled by requirements-core.txt; nothing to do here")
         return variant
-    # CUDA path: install with the same version pin as requirements-core.txt
-    # but from the cu121 index so we get a CUDA-enabled wheel. Doing this
-    # before requirements-core.txt means the later `pip install -r ...` sees
-    # the version constraint already satisfied and does not reinstall.
+    # CUDA path: same version pin as requirements-core.txt but from the cu121 index.
     _run([str(_venv_python()), "-m", "pip", "install",
           TORCH_PIN, "--index-url", CUDA_INDEX_URL], check=True)
     _ok(f"torch installed ({variant})")
