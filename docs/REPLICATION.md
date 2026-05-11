@@ -157,7 +157,7 @@ flowchart TD
 
     B6e --> B7[Step 7. train_all.py --model-type all<br/>VERIFY: 56 files across<br/>models/global, session/london, ny, asia]
     B7 --> B8[Step 8. One backtest<br/>backtest/run_backtest.py<br/>--pair EURUSD --strategy LR_global<br/>--from 2024-01-02 --to 2024-01-02]
-    B8 --> B9[Step 9. master_eval.py<br/>--eval-year 2024 --spreads 1.0<br/>VERIFY: output/master_eval/master_report.txt]
+    B8 --> B9[Step 9. master_eval.py<br/>--eval-year 2024 --spreads 1.0<br/>VERIFY: output/master_eval/latest_run.txt<br/>points at run_RUN_ID/master_report.txt]
     B9 --> B_END([Done. Cross-check<br/>results_all.csv vs prior run<br/>for RQ0])
 
     classDef setup fill:#eef6ff,stroke:#3a78c2;
@@ -550,7 +550,7 @@ The script enforces that `--eval-year` falls inside the locked test split years 
 
 ## Step 10: read the outputs
 
-Every master-evaluation run writes the following into `output/master_eval/`:
+Every master-evaluation run writes the following into a per-run subfolder `output/master_eval/run_<RUN_ID>/`, where `<RUN_ID>` is the UTC timestamp of the invocation. A pointer to the most recent run directory is left at `output/master_eval/latest_run.txt`. Pass `--output-dir DIR` to write into `DIR` directly instead of the auto-generated subfolder.
 
 - `master_report.txt`: the definitive text report. Sections cover the scoring system, per-pair buy-and-hold baselines on val and test, Part A rule-based (T1 to T5), Part B ML cross-session, DM test results, and the headline ranking.
 - `results_rule_based.csv`: every T1 to T5 row with all 13 metrics.
@@ -598,13 +598,12 @@ T1 through T3 only ever touch val. T4 only ever touches the train folds. T5 is t
 
 The headline is the T5 plus ML rows in `master_report.txt` for a chosen window. To answer each research question:
 
-**RQ0 reproducibility.** Run the master evaluation twice on the same machine with the same models on disk and the same arguments:
+**RQ0 reproducibility.** Run the master evaluation twice on the same machine with the same models on disk and the same arguments, writing each run to its own directory:
 
 ```bash
-python scripts/master_eval.py --eval-year 2024 --spreads 1.0
-mv output/master_eval/results_all.csv output/master_eval/results_all_run1.csv
-python scripts/master_eval.py --eval-year 2024 --spreads 1.0
-diff output/master_eval/results_all_run1.csv output/master_eval/results_all.csv
+python scripts/master_eval.py --eval-year 2024 --spreads 1.0 --output-dir output/master_eval/rq0_run1
+python scripts/master_eval.py --eval-year 2024 --spreads 1.0 --output-dir output/master_eval/rq0_run2
+diff output/master_eval/rq0_run1/results_all.csv output/master_eval/rq0_run2/results_all.csv
 ```
 
 The `diff` must produce no output. If it does, the platform is non-deterministic for the current configuration and RQ0 has been violated.
@@ -620,7 +619,7 @@ The platform is built so the answers are partial and qualified. It is unlikely t
 Replication is complete when:
 
 1. `python -m pytest tests/ -q` is green.
-2. `output/master_eval/master_report.txt` exists and was produced by a run on the locked test split.
+2. `output/master_eval/latest_run.txt` points at a `run_<RUN_ID>/` directory containing a `master_report.txt` produced by a run on the locked test split.
 3. The headline ranking in `master_report.txt` and the per-pair transfer matrices match a re-run on the same configuration (RQ0 holds).
 4. The four research-question answers can be read off the structured outputs: `transfer_matrix_*.csv` for RQ1, `dm_test_results.csv` for RQ2, the `diff` test above for RQ0.
 

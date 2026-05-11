@@ -1366,7 +1366,9 @@ def main() -> None:
                         help="Override eval window end (ISO date, e.g. 2024-12-31). "
                              "Applies to T5 and ML. Defaults to TEST_END from config.")
     parser.add_argument("--out",             type=str, default=None)
-    parser.add_argument("--output-dir",      type=str, default=str(OUTPUT_DIR))
+    parser.add_argument("--output-dir",      type=str, default=None,
+                        help="Output directory. Default: output/master_eval/run_<RUN_ID> "
+                             "(each run is preserved in its own subfolder).")
     args = parser.parse_args()
 
     # Resolve evaluation window - --eval-year takes precedence over --from/--to.
@@ -1395,9 +1397,12 @@ def main() -> None:
         if args.date_to is None:
             args.date_to = test_end_str
 
-    out_dir  = Path(args.output_dir)
-    out_path = Path(args.out) if args.out else out_dir / "master_report.txt"
     run_id   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    if args.output_dir is None:
+        out_dir = OUTPUT_DIR / f"run_{run_id}"
+    else:
+        out_dir = Path(args.output_dir)
+    out_path = Path(args.out) if args.out else out_dir / "master_report.txt"
     pairs    = ALL_PAIRS if "all" in args.pairs else [p.upper() for p in args.pairs]
 
     print(f"\n{'='*80}")
@@ -1514,10 +1519,16 @@ def main() -> None:
                   args.date_from, args.date_to)
     _save_csvs(out_dir, rb, ml, tr_lr, tr_lstm, gen_df, fi, dm_rows, be)
 
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    (OUTPUT_DIR / "latest_run.txt").write_text(
+        str(out_dir.resolve()) + "\n", encoding="utf-8"
+    )
+
     print(f"\n{'='*80}")
     print(f"DONE  |  run_id={run_id}")
     print(f"Report : {out_path}")
     print(f"CSVs   : {out_dir}")
+    print(f"Latest : {OUTPUT_DIR / 'latest_run.txt'}")
     print(f"{'='*80}\n")
 
 

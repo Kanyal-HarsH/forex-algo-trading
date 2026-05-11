@@ -361,32 +361,35 @@ PART B: ML
 
   Computing analytics...
   Writing outputs...
-  Report: output/master_eval/master_report.txt
+  Report: output/master_eval/run_YYYYMMDD_HHMMSS/master_report.txt
 
 DONE  |  run_id=YYYYMMDD_HHMMSS
-Report : output/master_eval/master_report.txt
-CSVs   : output/master_eval
+Report : output/master_eval/run_YYYYMMDD_HHMMSS/master_report.txt
+CSVs   : output/master_eval/run_YYYYMMDD_HHMMSS
+Latest : output/master_eval/latest_run.txt
 ```
 
 Expected runtime: 35 to 50 minutes for a single-year, single-spread, full-pair run.
 
-The output structure:
+The output structure (each invocation writes to its own subfolder under `output/master_eval/`, and a pointer to the most recent run is left at `output/master_eval/latest_run.txt`):
 
 ```
 output/master_eval/
-├── master_report.txt              definitive text report
-├── results_all.csv                all backtest rows, sorted by composite_score
-├── results_rule_based.csv         T1-T5 rows
-├── results_ml.csv                 ML cross-session rows
-├── best_worst_per_pair.csv        per-pair extremes summary
-├── transfer_matrix_lr_EURUSD.csv  one per pair (4x4 Sharpe matrices)
-├── transfer_matrix_lstm_EURUSD.csv
-├── session_generalisability.csv
-├── dm_test_results.csv            4 DM comparisons per pair
-└── cost_breakeven.csv
+├── latest_run.txt                       absolute path to the most recent run dir
+└── run_YYYYMMDD_HHMMSS/
+    ├── master_report.txt                definitive text report
+    ├── results_all.csv                  all backtest rows, sorted by composite_score
+    ├── results_rule_based.csv           T1-T5 rows
+    ├── results_ml.csv                   ML cross-session rows
+    ├── best_worst_per_pair.csv          per-pair extremes summary
+    ├── transfer_matrix_lr_EURUSD.csv    one per pair (4x4 Sharpe matrices)
+    ├── transfer_matrix_lstm_EURUSD.csv
+    ├── session_generalisability.csv
+    ├── dm_test_results.csv              4 DM comparisons per pair
+    └── cost_breakeven.csv
 ```
 
-Open `master_report.txt` in any text viewer for the headline ranking, the DM test results, and the per-pair transfer matrices in plain text. The seven CSVs are the canonical structured form for downstream analysis.
+Open the `master_report.txt` inside the latest run directory for the headline ranking, the DM test results, and the per-pair transfer matrices in plain text. To resolve the most recent run from the shell, read `output/master_eval/latest_run.txt`. The seven CSVs alongside the report are the canonical structured form for downstream analysis.
 
 
 ## Step 9: run individual backtests for inspection
@@ -465,8 +468,8 @@ The HTML report renders all three equity curves on shared axes for visual compar
 | `--ml-only` | Skip the rule-based T1 to T5 path | off | `--ml-only` |
 | `--eval-year` | Restrict T5 and ML to a single calendar year inside the test split | none (full test split) | `--eval-year 2024` |
 | `--from` / `--to` | Custom ISO date window inside the test split | full test span | `--from 2024-06-01 --to 2024-12-31` |
-| `--out` | Custom report path | `output/master_eval/master_report.txt` | `--out output/run1.txt` |
-| `--output-dir` | Custom output directory for CSVs | `output/master_eval` | `--output-dir output/run1` |
+| `--out` | Custom report path | `<output-dir>/master_report.txt` | `--out output/run1.txt` |
+| `--output-dir` | Custom output directory (otherwise a per-run subfolder under `output/master_eval/`) | `output/master_eval/run_<RUN_ID>` | `--output-dir output/run1` |
 
 ### `backtest/run_backtest.py`
 
