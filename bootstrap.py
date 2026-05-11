@@ -487,6 +487,10 @@ def step_tests(args: argparse.Namespace) -> bool:
     if args.no_tests:
         _skip("--no-tests set; skipping verification")
         return True
+    tests_dir = PROJECT_DIR / "tests"
+    if not tests_dir.exists() or not any(tests_dir.glob("test_*.py")):
+        _skip("no tests/ directory in this checkout; skipping verification")
+        return True
     code, _ = _run([str(_venv_python()), "-m", "pytest", "tests/", "-q"],
                    cwd=PROJECT_DIR)
     if code != 0:
