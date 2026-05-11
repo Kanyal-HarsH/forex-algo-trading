@@ -448,7 +448,7 @@ The full reproducibility checklist, including the per-stage regression checks th
 
 ## Team
 
-The platform is built and maintained by four researchers.
+The platform is built and maintained by four students.
 
 |        Members            |
 |---------------------------|
