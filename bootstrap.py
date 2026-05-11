@@ -384,14 +384,22 @@ def step_venv(args: argparse.Namespace) -> None:
             _err(f"venv interpreter missing at {_venv_python()}")
             sys.exit(1)
         _ok(f"venv ready: {VENV_DIR}")
-    _info("Upgrading pip, setuptools, wheel")
-    _run([str(_venv_python()), "-m", "pip", "install", "--upgrade",
-          "pip", "setuptools", "wheel"], check=True)
-    _ok("pip toolchain upgraded")
+    _info("Upgrading pip")
+    _run([str(_venv_python()), "-m", "pip", "install", "--upgrade", "pip"],
+         check=True)
+    _ok("pip upgraded")
+    # setuptools and wheel are intentionally left at whatever the venv shipped
+    # with. Pre-upgrading setuptools breaks pins like torch's `setuptools<82`
+    # constraint, and triggers a downgrade later that wastes time and confuses
+    # the install log. pip itself pulls the right setuptools as a build dep
+    # when needed.
+
+
+TORCH_PIN = "torch>=2.6,<3.0"  # mirror requirements-core.txt
 
 
 def step_install_torch(args: argparse.Namespace) -> str:
-    _print_step(3, 10, "Install torch (wheel selection)")
+    _print_step(3, 10, "Torch wheel selection")
     if args.offline:
         _warn("--offline set; skipping torch install. Existing torch in venv will be used.")
         return "offline"
@@ -402,10 +410,18 @@ def step_install_torch(args: argparse.Namespace) -> str:
     else:
         variant, detail = _detect_cuda()
     _info(f"torch variant: {variant} ({detail})")
-    cmd = [str(_venv_python()), "-m", "pip", "install", "--upgrade", "torch"]
-    if variant == "cu121":
-        cmd += ["--index-url", CUDA_INDEX_URL]
-    _run(cmd, check=True)
+    if variant != "cu121":
+        # CPU torch (Linux/Windows default and every macOS) is just a normal
+        # PyPI install. requirements-core.txt already pins the version, so
+        # running pip twice would either be a no-op or risk a downgrade fight.
+        _skip("CPU torch is handled by requirements-core.txt; nothing to do here")
+        return variant
+    # CUDA path: install with the same version pin as requirements-core.txt
+    # but from the cu121 index so we get a CUDA-enabled wheel. Doing this
+    # before requirements-core.txt means the later `pip install -r ...` sees
+    # the version constraint already satisfied and does not reinstall.
+    _run([str(_venv_python()), "-m", "pip", "install",
+          TORCH_PIN, "--index-url", CUDA_INDEX_URL], check=True)
     _ok(f"torch installed ({variant})")
     return variant
 

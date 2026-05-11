@@ -1,35 +1,40 @@
 # forex-algo-trading core runtime dependencies.
 #
-# Compatible-release pins (~=) trade exact reproducibility for fresh-clone
-# resilience: pip is free to pull a new patch release if the pinned one
-# disappears from PyPI. bootstrap.py writes requirements.lock.txt after a
-# successful install for byte-identical reproducibility.
+# Pinning rule: range pins (>=lower,<next_major). Lower bound is the oldest
+# version we know works against the codebase. Upper bound is just below the
+# next major release so a future ABI break doesn't silently land in a fresh
+# clone. Concrete versions land in requirements.lock.txt after a successful
+# bootstrap install.
 #
-# torch is intentionally a range here because the bootstrap step picks the
-# CPU or CUDA wheel at install time via --index-url. Letting torch float
-# inside [2.2, 2.7) covers Python 3.10 through 3.13 with prebuilt wheels.
+# Two pins matter for Python 3.13 + macOS arm64 wheel availability:
+#
+#   pyarrow   needs >= 17.0 (16.x has no cp313 wheels for darwin-arm64 and
+#             building from source fails on setuptools >= 81 because the
+#             build script imports pkg_resources, which was removed).
+#   torch     needs >= 2.6 for cp313 wheels on every platform. 2.6 through
+#             the current 2.x line all install cleanly.
 
 # Data manipulation and IO
-pandas~=2.2
-numpy~=1.26
-pyarrow~=16.0
+pandas>=2.2,<3.0
+numpy>=1.26,<3.0
+pyarrow>=17.0,<22.0
 
 # Machine learning - classical
-scikit-learn~=1.5
+scikit-learn>=1.5,<2.0
 
 # Machine learning - deep
-torch>=2.2,<2.7
+torch>=2.6,<3.0
 
 # Statistics
-scipy~=1.13
+scipy>=1.13,<2.0
 
 # Configuration loading
-PyYAML~=6.0
-python-dotenv~=1.0
+PyYAML>=6.0,<7.0
+python-dotenv>=1.0,<2.0
 
 # HTTP client and HTML parsing (download_fx_data.py)
-requests~=2.32
-beautifulsoup4~=4.12
+requests>=2.32,<3.0
+beautifulsoup4>=4.12,<5.0
 
 # Test runner
-pytest~=8.2
+pytest>=8.2,<9.0

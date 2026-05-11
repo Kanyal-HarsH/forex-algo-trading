@@ -2,11 +2,14 @@
 #
 # These cover plotting and reporting. The pipeline and master_eval.py
 # work without them, but the HTML reports and EDA scripts will fail.
+#
+# Range pins for the same reason as requirements-core.txt: wheel
+# availability changes faster than this file does.
 
 # Plotting (HTML report generator and EDA scripts)
-matplotlib~=3.9
-seaborn~=0.13
+matplotlib>=3.9,<4.0
+seaborn>=0.13,<1.0
 
 # PDF export of HTML reports (opt-in: bootstrap.py installs only with --with-pdf;
 # after install, run: python -m playwright install chromium)
-# playwright~=1.45
+# playwright>=1.45,<2.0
