@@ -441,7 +441,12 @@ def train_lstm(pair: str, session: str, force: bool, batch_size: int = 2048, use
 
     criterion = torch.nn.NLLLoss(weight=weights_tensor)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    scaler    = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    # torch.amp.GradScaler was introduced in PyTorch 2.3; fall back to
+    # torch.cuda.amp.GradScaler for 2.2.x (still available in 2.3+ as well).
+    if hasattr(torch.amp, "GradScaler"):
+        scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    else:
+        scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
 
     best_val_loss = float("inf")
     best_state: dict | None = None
