@@ -64,3 +64,8 @@ requirements.lock.txt
 
 # Inspection scripts kept local
 eda_split_readiness.py
+
+# Claude code
+.claude/
+
+.DS_Store
