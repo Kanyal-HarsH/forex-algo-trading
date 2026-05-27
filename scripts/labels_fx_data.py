@@ -82,7 +82,6 @@ def load_feature_pair(pair: str) -> pd.DataFrame:
 
 
 def compute_future_return(df: pd.DataFrame, horizon: int) -> pd.Series:
-    # shift aligns the future close to the current row
     return df["close"].shift(-horizon) / df["close"] - 1.0
 
 
@@ -212,7 +211,6 @@ def process_pair(
     )
 
     if not keep_tail:
-        # drop tail rows where forward close is unavailable
         primary_col = f"label_3class_{horizon_primary}"
         secondary_col = f"label_3class_{horizon_secondary}"
         labeled_df = labeled_df.dropna(subset=[primary_col, secondary_col]).reset_index(drop=True)
