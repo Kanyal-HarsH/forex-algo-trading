@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import warnings
 from io import BytesIO
 from pathlib import Path
 import time
@@ -17,15 +19,9 @@ PARQUET_DIR = DATA_DIR / "parquet"
 EXTRACTED_DIR.mkdir(parents=True, exist_ok=True)
 PARQUET_DIR.mkdir(parents=True, exist_ok=True)
 
-PAIRS = [
-    "EURUSD",
-    "GBPUSD",
-    "USDJPY",
-    "USDCHF",
-    "USDCAD",
-    "AUDUSD",
-    "NZDUSD",
-]
+import sys
+sys.path.insert(0, str(PROJECT_DIR))
+from config.constants import PAIRS
 
 YEARS = list(range(2015, 2026))
 
@@ -242,7 +238,36 @@ def process_pair_to_parquet(pair: str) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Download yearly FX bar archives from histdata.com and write them "
+            "to data/extracted/ and data/parquet/."
+        ),
+    )
+    parser.add_argument(
+        "--insecure", action="store_true",
+        help=(
+            "Skip TLS certificate verification when talking to histdata.com. "
+            "Use this only if histdata.com's certificate is expired or otherwise "
+            "untrusted (a known intermittent issue with the upstream site). "
+            "The downloaded archive contents are still validated by zipfile, "
+            "but the transport is no longer authenticated."
+        ),
+    )
+    args = parser.parse_args()
+
     http = requests.Session()
+    if args.insecure:
+        # Suppress the InsecureRequestWarning so logs stay readable; the print
+        # below is the user-visible warning.
+        from urllib3.exceptions import InsecureRequestWarning
+        warnings.simplefilter("ignore", InsecureRequestWarning)
+        http.verify = False
+        print(
+            "WARNING: --insecure is set. TLS verification is disabled for the "
+            "duration of this run. Re-enable it as soon as histdata.com's "
+            "certificate is restored."
+        )
 
     for pair in PAIRS:
         print(f"\n{'=' * 50}")

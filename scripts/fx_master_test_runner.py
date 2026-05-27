@@ -20,9 +20,10 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from backtest.engine import PAIRS, run_backtest, run_wf_folds
+from backtest.engine import run_backtest, run_wf_folds
 from backtest.strategies import STRATEGY_REGISTRY, get_strategy
 from backtest.run_backtest import load_split_data
+from config.constants import PAIRS, PAIR_SPREAD_PIPS, TP_SL_GRID as _CONFIG_TP_SL_GRID
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = PROJECT_DIR / "output"
@@ -30,22 +31,13 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 ALL_STRATEGIES = list(STRATEGY_REGISTRY.keys())
 
-ALL_PAIRS = [p for p in PAIRS if p != "EURGBP"]
+ALL_PAIRS = list(PAIRS)
 
 ALL_SESSIONS = [None, "london", "ny", "asia", "overlap"]
 ALL_DIRECTIONS = ["long_short", "long_only", "short_only"]
-TP_SL_GRID = [(None, None), (10, 5), (15, 7), (20, 10), (30, 15)]
-
-DEFAULT_SPREADS = {
-    "EURUSD": 0.6,
-    "GBPUSD": 0.8,
-    "USDJPY": 0.7,
-    "USDCHF": 1.0,
-    "AUDUSD": 0.8,
-    "USDCAD": 1.0,
-    "NZDUSD": 1.2,
-    "EURGBP": 1.0,
-}
+TP_SL_GRID: list[tuple[int | None, int | None]] = [(None, None)] + [
+    (int(tp), int(sl)) for tp, sl in _CONFIG_TP_SL_GRID
+]
 
 
 @dataclass
@@ -174,7 +166,7 @@ def validate_run_spec(spec: RunSpec) -> list[str]:
     if (spec.tp_pips is None) != (spec.sl_pips is None):
         flags.append("PARTIAL_TP_SL")
 
-    spread = spec.spread if spec.spread is not None else DEFAULT_SPREADS.get(spec.pair, 1.0)
+    spread = spec.spread if spec.spread is not None else PAIR_SPREAD_PIPS.get(spec.pair, 1.0)
 
     if spec.tp_pips is not None and spec.tp_pips <= spread:
         flags.append("TP_LE_SPREAD")
@@ -185,211 +177,182 @@ def validate_run_spec(spec: RunSpec) -> list[str]:
     return flags
 
 
+def _outcome_from_spec(spec: RunSpec, **overrides: Any) -> RunOutcome:
+    """Build a RunOutcome inheriting all RunSpec descriptor fields, then apply overrides."""
+    base = dict(
+        tier=spec.tier,
+        pair=spec.pair,
+        strategy=spec.strategy,
+        split=spec.split,
+        session=spec.session,
+        direction=spec.direction,
+        tp_pips=spec.tp_pips,
+        sl_pips=spec.sl_pips,
+        folds=spec.folds,
+    )
+    base.update(overrides)
+    return RunOutcome(**base)
+
+
+def _execute_wf_folds(spec: RunSpec, warn_flags: list[str]) -> RunOutcome:
+    fold_results = run_wf_folds(
+        pair=spec.pair,
+        strategy=spec.strategy,
+        n_folds=spec.folds,
+        split="train",
+        spread_pips=spec.spread,
+        tp_pips=spec.tp_pips,
+        sl_pips=spec.sl_pips,
+        capital_initial=spec.capital,
+        max_hold_bars=spec.max_hold,
+        session=spec.session,
+        entry_time=spec.entry_time,
+        resample=spec.resample,
+        direction_mode=spec.direction,
+        mode=spec.mode,
+    )
+    sharpes = [r.net_sharpe for r in fold_results]
+    neg_folds = sum(1 for s in sharpes if s < 0)
+    last = fold_results[-1]
+
+    return _outcome_from_spec(
+        spec,
+        ok=True,
+        status="OK",
+        net_sharpe=safe_mean(sharpes),
+        gross_sharpe=last.gross_sharpe,
+        total_return=safe_mean([r.total_return for r in fold_results]),
+        max_drawdown=safe_mean([r.max_drawdown for r in fold_results]),
+        calmar=safe_mean([r.calmar for r in fold_results]),
+        win_rate=safe_mean([r.win_rate for r in fold_results]),
+        profit_factor=safe_mean([r.profit_factor for r in fold_results]),
+        avg_trade_bars=safe_mean([r.avg_trade_bars for r in fold_results]),
+        turnover=safe_mean([r.turnover for r in fold_results]),
+        sortino=safe_mean([r.sortino for r in fold_results]),
+        n_trades=sum(r.n_trades for r in fold_results),
+        capital_final=last.capital_final,
+        signal_long=last.signal_dist.get("Long", 0),
+        signal_short=last.signal_dist.get("Short", 0),
+        signal_flat=last.signal_dist.get("Flat", 0),
+        fold_mean_sharpe=safe_mean(sharpes),
+        fold_std_sharpe=safe_std(sharpes),
+        negative_fold_count=neg_folds,
+        warning_flags=warn_flags,
+        notes="WF_FOLDS",
+    )
+
+
+def _prepare_split_data(spec: RunSpec) -> pd.DataFrame:
+    df = load_split_data(spec.pair, spec.split)
+    if "timestamp_utc" in df.columns:
+        df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True)
+        df = (
+            df.sort_values("timestamp_utc")
+            .drop_duplicates(subset=["timestamp_utc"])
+            .reset_index(drop=True)
+        )
+    return df
+
+
+def _execute_run(spec: RunSpec, df: pd.DataFrame, warn_flags: list[str]) -> RunOutcome:
+    warmup = get_strategy(spec.strategy).warmup_bars
+    if len(df) <= warmup:
+        return _outcome_from_spec(
+            spec,
+            ok=False,
+            status="SKIP_WARMUP_GT_DATA",
+            warning_flags=warn_flags + ["WARMUP_GT_DATA"],
+            notes=f"rows={len(df)} warmup={warmup}",
+        )
+
+    strat = get_strategy(spec.strategy)
+    signals = strat.generate_signals(df.reset_index(drop=True)).reset_index(drop=True)
+    prices = df["close"].reset_index(drop=True)
+
+    timestamps = (
+        df["timestamp_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ").tolist()
+        if "timestamp_utc" in df.columns
+        else []
+    )
+
+    if signals.abs().sum() == 0:
+        return _outcome_from_spec(
+            spec,
+            ok=False,
+            status="ZERO_SIGNALS",
+            warning_flags=warn_flags + ["ZERO_SIGNALS"],
+            notes="all emitted signals are flat",
+        )
+
+    r = run_backtest(
+        signals=signals,
+        prices=prices,
+        pair=spec.pair,
+        strategy=strat.name,
+        split=spec.split,
+        spread_pips=spec.spread,
+        tp_pips=spec.tp_pips,
+        sl_pips=spec.sl_pips,
+        capital_initial=spec.capital,
+        max_hold_bars=spec.max_hold,
+        timestamps=timestamps,
+        session=spec.session,
+        entry_time=spec.entry_time,
+        resample=spec.resample,
+        direction_mode=spec.direction,
+        mode=spec.mode,
+        df_full=df,
+    )
+
+    status = "OK"
+    if r.n_trades == 0:
+        status = "ZERO_TRADES"
+        warn_flags.append("ZERO_TRADES")
+    if r.profit_factor >= 998:
+        warn_flags.append("PF_CAPPED")
+    if r.signal_dist.get("Long", 0) == 0 and r.signal_dist.get("Short", 0) == 0:
+        warn_flags.append("NO_DIRECTIONAL_SIGNALS")
+
+    return _outcome_from_spec(
+        spec,
+        ok=True,
+        status=status,
+        net_sharpe=r.net_sharpe,
+        gross_sharpe=r.gross_sharpe,
+        total_return=r.total_return,
+        max_drawdown=r.max_drawdown,
+        calmar=r.calmar,
+        win_rate=r.win_rate,
+        profit_factor=r.profit_factor,
+        avg_trade_bars=r.avg_trade_bars,
+        turnover=r.turnover,
+        sortino=r.sortino,
+        n_trades=r.n_trades,
+        capital_final=r.capital_final,
+        signal_long=r.signal_dist.get("Long", 0),
+        signal_short=r.signal_dist.get("Short", 0),
+        signal_flat=r.signal_dist.get("Flat", 0),
+        warning_flags=warn_flags,
+        notes="",
+    )
+
+
 def _single_run(spec: RunSpec) -> RunOutcome:
     try:
         warn_flags = validate_run_spec(spec)
-
         if spec.folds > 0:
-            fold_results = run_wf_folds(
-                pair=spec.pair,
-                strategy=spec.strategy,
-                n_folds=spec.folds,
-                split="train",
-                spread_pips=spec.spread,
-                tp_pips=spec.tp_pips,
-                sl_pips=spec.sl_pips,
-                capital_initial=spec.capital,
-                max_hold_bars=spec.max_hold,
-                session=spec.session,
-                entry_time=spec.entry_time,
-                resample=spec.resample,
-                direction_mode=spec.direction,
-                mode=spec.mode,
-            )
-            sharpes = [r.net_sharpe for r in fold_results]
-            neg_folds = sum(1 for s in sharpes if s < 0)
-            last = fold_results[-1]
-
-            return RunOutcome(
-                ok=True,
-                status="OK",
-                tier=spec.tier,
-                pair=spec.pair,
-                strategy=spec.strategy,
-                split=spec.split,
-                session=spec.session,
-                direction=spec.direction,
-                tp_pips=spec.tp_pips,
-                sl_pips=spec.sl_pips,
-                folds=spec.folds,
-                net_sharpe=safe_mean(sharpes),
-                gross_sharpe=last.gross_sharpe,
-                total_return=safe_mean([r.total_return for r in fold_results]),
-                max_drawdown=safe_mean([r.max_drawdown for r in fold_results]),
-                calmar=safe_mean([r.calmar for r in fold_results]),
-                win_rate=safe_mean([r.win_rate for r in fold_results]),
-                profit_factor=safe_mean([r.profit_factor for r in fold_results]),
-                avg_trade_bars=safe_mean([r.avg_trade_bars for r in fold_results]),
-                turnover=safe_mean([r.turnover for r in fold_results]),
-                sortino=safe_mean([r.sortino for r in fold_results]),
-                n_trades=sum(r.n_trades for r in fold_results),
-                capital_final=last.capital_final,
-                signal_long=last.signal_dist.get("Long", 0),
-                signal_short=last.signal_dist.get("Short", 0),
-                signal_flat=last.signal_dist.get("Flat", 0),
-                fold_mean_sharpe=safe_mean(sharpes),
-                fold_std_sharpe=safe_std(sharpes),
-                negative_fold_count=neg_folds,
-                warning_flags=warn_flags,
-                notes="WF_FOLDS",
-            )
-
-        df = load_split_data(spec.pair, spec.split)
-
-        if "timestamp_utc" in df.columns:
-            df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True)
-            df = (
-                df.sort_values("timestamp_utc")
-                .drop_duplicates(subset=["timestamp_utc"])
-                .reset_index(drop=True)
-            )
-
-        warmup = get_strategy(spec.strategy).warmup_bars
-        if len(df) <= warmup:
-            return RunOutcome(
-                ok=False,
-                status="SKIP_WARMUP_GT_DATA",
-                tier=spec.tier,
-                pair=spec.pair,
-                strategy=spec.strategy,
-                split=spec.split,
-                session=spec.session,
-                direction=spec.direction,
-                tp_pips=spec.tp_pips,
-                sl_pips=spec.sl_pips,
-                folds=spec.folds,
-                warning_flags=warn_flags + ["WARMUP_GT_DATA"],
-                notes=f"rows={len(df)} warmup={warmup}",
-            )
-
-        strat = get_strategy(spec.strategy)
-        signals = strat.generate_signals(df.reset_index(drop=True)).reset_index(drop=True)
-        prices = df["close"].reset_index(drop=True)
-
-        timestamps = (
-            df["timestamp_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ").tolist()
-            if "timestamp_utc" in df.columns
-            else []
-        )
-
-        if signals.abs().sum() == 0:
-            return RunOutcome(
-                ok=False,
-                status="ZERO_SIGNALS",
-                tier=spec.tier,
-                pair=spec.pair,
-                strategy=spec.strategy,
-                split=spec.split,
-                session=spec.session,
-                direction=spec.direction,
-                tp_pips=spec.tp_pips,
-                sl_pips=spec.sl_pips,
-                folds=spec.folds,
-                warning_flags=warn_flags + ["ZERO_SIGNALS"],
-                notes="all emitted signals are flat",
-            )
-
-        r = run_backtest(
-            signals=signals,
-            prices=prices,
-            pair=spec.pair,
-            strategy=strat.name,
-            split=spec.split,
-            spread_pips=spec.spread,
-            tp_pips=spec.tp_pips,
-            sl_pips=spec.sl_pips,
-            capital_initial=spec.capital,
-            max_hold_bars=spec.max_hold,
-            timestamps=timestamps,
-            session=spec.session,
-            entry_time=spec.entry_time,
-            resample=spec.resample,
-            direction_mode=spec.direction,
-            mode=spec.mode,
-            df_full=df,
-        )
-
-        status = "OK"
-        if r.n_trades == 0:
-            status = "ZERO_TRADES"
-            warn_flags.append("ZERO_TRADES")
-
-        if r.profit_factor >= 998:
-            warn_flags.append("PF_CAPPED")
-
-        if r.signal_dist.get("Long", 0) == 0 and r.signal_dist.get("Short", 0) == 0:
-            warn_flags.append("NO_DIRECTIONAL_SIGNALS")
-
-        return RunOutcome(
-            ok=True,
-            status=status,
-            tier=spec.tier,
-            pair=spec.pair,
-            strategy=spec.strategy,
-            split=spec.split,
-            session=spec.session,
-            direction=spec.direction,
-            tp_pips=spec.tp_pips,
-            sl_pips=spec.sl_pips,
-            folds=spec.folds,
-            net_sharpe=r.net_sharpe,
-            gross_sharpe=r.gross_sharpe,
-            total_return=r.total_return,
-            max_drawdown=r.max_drawdown,
-            calmar=r.calmar,
-            win_rate=r.win_rate,
-            profit_factor=r.profit_factor,
-            avg_trade_bars=r.avg_trade_bars,
-            turnover=r.turnover,
-            sortino=r.sortino,
-            n_trades=r.n_trades,
-            capital_final=r.capital_final,
-            signal_long=r.signal_dist.get("Long", 0),
-            signal_short=r.signal_dist.get("Short", 0),
-            signal_flat=r.signal_dist.get("Flat", 0),
-            warning_flags=warn_flags,
-            notes="",
-        )
+            return _execute_wf_folds(spec, warn_flags)
+        df = _prepare_split_data(spec)
+        return _execute_run(spec, df, warn_flags)
 
     except FileNotFoundError as e:
-        return RunOutcome(
-            ok=False,
-            status="MISSING_FILE",
-            tier=spec.tier,
-            pair=spec.pair,
-            strategy=spec.strategy,
-            split=spec.split,
-            session=spec.session,
-            direction=spec.direction,
-            tp_pips=spec.tp_pips,
-            sl_pips=spec.sl_pips,
-            folds=spec.folds,
-            error=str(e),
-        )
+        return _outcome_from_spec(spec, ok=False, status="MISSING_FILE", error=str(e))
 
     except Exception as e:
-        return RunOutcome(
+        return _outcome_from_spec(
+            spec,
             ok=False,
             status="ENGINE_ERROR",
-            tier=spec.tier,
-            pair=spec.pair,
-            strategy=spec.strategy,
-            split=spec.split,
-            session=spec.session,
-            direction=spec.direction,
-            tp_pips=spec.tp_pips,
-            sl_pips=spec.sl_pips,
-            folds=spec.folds,
             error=f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
         )
 

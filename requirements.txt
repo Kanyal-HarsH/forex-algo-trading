@@ -1,8 +1,13 @@
-pandas
-numpy
-pyarrow
-scikit-learn
-matplotlib
-seaborn
-pyyaml
-python-dotenv
+# Back-compat shim. Pulls the split requirement files in order.
+#
+# New code paths use:
+#   pip install -r requirements-core.txt
+#   pip install -r requirements-extras.txt
+#
+# Anything that already calls `pip install -r requirements.txt` continues
+# to work and pulls the same union of dependencies. bootstrap.py uses
+# the split files directly and applies the CPU / CUDA wheel selection
+# before installing the rest.
+
+-r requirements-core.txt
+-r requirements-extras.txt

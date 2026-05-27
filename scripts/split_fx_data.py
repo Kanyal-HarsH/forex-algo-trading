@@ -1,11 +1,33 @@
 from __future__ import annotations
 
 import argparse
+import pickle
+import sys
 from pathlib import Path
 
-import pandas as pd
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
 
-from config.constants import PURGE_ROWS, HORIZON_SECONDARY, DEFAULT_N_FOLDS
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+
+from config.constants import (
+    PURGE_ROWS,
+    HORIZON_SECONDARY,
+    DEFAULT_N_FOLDS,
+    PAIRS,
+    DATASETS_DIR as SPLIT_ROOT_DIR,
+    TRAIN_DIR,
+    VAL_DIR,
+    TEST_DIR,
+    FOLDS_DIR,
+    LR_FEATURES,
+    SCALERS_DIR,
+    SESSION_FILTER_MAP,
+    SESSION_TRAIN_DIRS,
+)
+from scripts._common import ensure_dir, save_csv, load_pair_parquet
 
 assert PURGE_ROWS >= HORIZON_SECONDARY, (
     f"PURGE_ROWS ({PURGE_ROWS}) must be >= HORIZON_SECONDARY ({HORIZON_SECONDARY}) "
@@ -17,14 +39,7 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 LABEL_ROOT_DIR = PROJECT_DIR / "labels"
 LABEL_PAIR_DIR = LABEL_ROOT_DIR / "pair"
 
-SPLIT_ROOT_DIR = PROJECT_DIR / "datasets"
-TRAIN_DIR      = SPLIT_ROOT_DIR / "train"
-VAL_DIR        = SPLIT_ROOT_DIR / "val"
-TEST_DIR       = SPLIT_ROOT_DIR / "test"
-FOLDS_DIR      = SPLIT_ROOT_DIR / "folds"
 REPORTS_DIR    = SPLIT_ROOT_DIR / "reports"
-
-PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD"]
 
 REQUIRED_COLUMNS = [
     "timestamp_utc",
@@ -39,14 +54,6 @@ DEFAULT_VAL_END     = "2023-12-31 23:59:59+00:00"
 FOLD_FIRST_VAL_YEAR = 2019
 
 
-def ensure_dir(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def save_csv(df: pd.DataFrame, path: Path) -> None:
-    ensure_dir(path.parent)
-    df.to_csv(path, index=False)
 
 
 def parse_timestamp(ts_str: str) -> pd.Timestamp:
@@ -88,27 +95,19 @@ def parse_args() -> argparse.Namespace:
                         help="Recompute fold outputs only (leaves fixed split untouched).")
     parser.add_argument("--force-fixed", action="store_true",
                         help="Recompute fixed split outputs only (leaves folds untouched).")
+    parser.add_argument("--skip-scaler", action="store_true",
+                        help="Skip fitting and saving the StandardScaler.")
     return parser.parse_args()
 
 
 
 def load_labeled_pair(pair: str) -> pd.DataFrame:
-    """Load and validate one labeled pair parquet."""
-    path = LABEL_PAIR_DIR / f"{pair}_2015_2025_labeled.parquet"
-    if not path.exists():
-        raise FileNotFoundError(f"Missing labeled parquet: {path}")
-
-    df = pd.read_parquet(path)
-    missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
-    if missing:
-        raise ValueError(f"{pair}: missing required columns: {missing}")
-    if df.empty:
-        raise ValueError(f"{pair}: labeled parquet is empty")
-
-    df = df.copy()
-    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
-    df = df.sort_values("timestamp_utc").reset_index(drop=True)
-    return df
+    return load_pair_parquet(
+        pair,
+        LABEL_PAIR_DIR,
+        suffix="labeled",
+        required_columns=REQUIRED_COLUMNS,
+    )
 
 
 def apply_purge(df: pd.DataFrame, purge_rows: int) -> pd.DataFrame:
@@ -184,12 +183,13 @@ def process_fixed_split(
     val_end: pd.Timestamp,
     purge_rows: int,
     force: bool,
+    skip_scaler: bool = False,
 ) -> pd.DataFrame:
     """Produce the fixed train / val / test parquets for one pair."""
     summary_path = REPORTS_DIR / f"{pair}_split_summary.csv"
 
     if _fixed_outputs_exist(pair) and not force:
-        print(f"  [fixed] {pair}: all outputs exist — skipping (use --force to recompute)")
+        print(f"  [fixed] {pair}: all outputs exist - skipping (use --force to recompute)")
         return pd.read_csv(summary_path)
 
     raw_train = slice_window(full_df, start=None,      end=train_end)
@@ -203,7 +203,7 @@ def process_fixed_split(
     for name, split in [("train", train_df), ("val", val_df), ("test", test_df)]:
         if split.empty:
             raise ValueError(
-                f"{pair}: fixed {name} split is empty — check date boundaries."
+                f"{pair}: fixed {name} split is empty - check date boundaries."
             )
 
     ensure_dir(TRAIN_DIR)
@@ -214,6 +214,14 @@ def process_fixed_split(
     train_df.to_parquet(TRAIN_DIR  / f"{pair}_train.parquet", index=False)
     val_df.to_parquet(  VAL_DIR    / f"{pair}_val.parquet",   index=False)
     test_df.to_parquet( TEST_DIR   / f"{pair}_test.parquet",  index=False)
+
+    if not skip_scaler:
+        fit_and_save_scaler(
+            pair=pair,
+            train_df=train_df,
+            feature_cols=list(LR_FEATURES),
+            scalers_dir=SCALERS_DIR,
+        )
 
     record = {
         "pair":                 pair,
@@ -289,7 +297,7 @@ def process_folds(
                 columns=["timestamp_utc", "label", "session"],
             )
             print(
-                f"  [fold {fold}] {pair}: outputs exist — skipping "
+                f"  [fold {fold}] {pair}: outputs exist - skipping "
                 f"(train={len(existing_train):,}  val={len(existing_val):,})"
             )
             row = {
@@ -332,12 +340,82 @@ def process_folds(
 
         print(
             f"  [fold {fold}] {pair}: "
-            f"train <= {train_end.year}  ({len(train_df):,} rows)  "
+            f"train <={train_end.year}  ({len(train_df):,} rows)  "
             f"val {val_start.year}  ({len(val_df):,} rows)  "
             f"purge={purge_rows}"
         )
 
     return fold_summaries
+
+def fit_and_save_scaler(
+    pair: str,
+    train_df: pd.DataFrame,
+    feature_cols: list[str],
+    scalers_dir: Path,
+) -> StandardScaler:
+    """Fit StandardScaler on train_df[feature_cols] and save to disk.
+
+    Saves {"scaler": scaler, "feature_cols": available} so callers can
+    always reconstruct the exact column order used at fit time.
+    Columns missing from train_df are skipped with a warning.
+    """
+    available = [c for c in feature_cols if c in train_df.columns]
+    missing = [c for c in feature_cols if c not in train_df.columns]
+    if missing:
+        print(
+            f"  [scaler] {pair}: WARNING - {len(missing)} feature cols not in data "
+            f"(run features_fx_data.py --force first): {missing[:5]}{'...' if len(missing) > 5 else ''}"
+        )
+
+    X = train_df[available].fillna(0).values
+    scaler = StandardScaler()
+    scaler.fit(X)
+
+    ensure_dir(scalers_dir)
+    scaler_path = scalers_dir / f"{pair}_scaler.pkl"
+    with open(scaler_path, "wb") as fh:
+        pickle.dump({"scaler": scaler, "feature_cols": available}, fh)
+
+    print(f"  [scaler] {pair}: fitted on {len(available)} features -> {scaler_path}")
+    return scaler
+
+
+def process_session_splits(
+    pair: str,
+    train_df: pd.DataFrame,
+    session_filter_map: dict[str, list[str]],
+    session_train_dirs: dict[str, Path],
+    force: bool,
+) -> None:
+    """Write session-filtered training parquets for each non-global session.
+
+    Session models use the same global scaler - no per-session refitting.
+    """
+    for session_name, session_values in session_filter_map.items():
+        out_dir  = session_train_dirs[session_name]
+        out_path = out_dir / f"{pair}_train.parquet"
+
+        if out_path.exists() and not force:
+            print(f"  [session-split] {pair}/{session_name}: exists - skip")
+            continue
+
+        mask = train_df["session"].isin(session_values)
+        session_df = train_df.loc[mask].reset_index(drop=True)
+
+        if session_df.empty:
+            print(
+                f"  [session-split] {pair}/{session_name}: WARNING - empty after "
+                f"filter (session_values={session_values})"
+            )
+            continue
+
+        ensure_dir(out_dir)
+        session_df.to_parquet(out_path, index=False)
+        print(
+            f"  [session-split] {pair}/{session_name}: "
+            f"{len(session_df):,} rows ({mask.mean() * 100:.1f}% of train) -> {out_path}"
+        )
+
 
 def main() -> None:
     args = parse_args()
@@ -363,9 +441,9 @@ def main() -> None:
     fold_rows:       list[dict]         = []
 
     for pair in PAIRS:
-        print(f"\n{'─'*60}")
+        print(f"\n{'-'*60}")
         print(f"Processing: {pair}")
-        print(f"{'─'*60}")
+        print(f"{'-'*60}")
 
         full_df = load_labeled_pair(pair)
         print(
@@ -378,8 +456,21 @@ def main() -> None:
             pair=pair, full_df=full_df,
             train_end=train_end, val_end=val_end,
             purge_rows=purge_rows, force=force_fixed,
+            skip_scaler=args.skip_scaler,
         )
         fixed_summaries.append(summary)
+
+        # Session-filtered training parquets for session-conditional models
+        train_parquet = TRAIN_DIR / f"{pair}_train.parquet"
+        if train_parquet.exists():
+            train_for_session = pd.read_parquet(train_parquet)
+            process_session_splits(
+                pair=pair,
+                train_df=train_for_session,
+                session_filter_map=SESSION_FILTER_MAP,
+                session_train_dirs=SESSION_TRAIN_DIRS,
+                force=force_fixed,
+            )
 
         pair_fold_rows = process_folds(
             pair=pair, full_df=full_df,

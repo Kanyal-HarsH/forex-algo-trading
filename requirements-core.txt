@@ -1,0 +1,26 @@
+# Core runtime deps. Range pins: lower = oldest tested, upper = below next major. Lockfile is requirements.lock.txt after bootstrap.
+
+# Data manipulation and IO
+pandas>=2.2,<3.0
+numpy>=1.26,<3.0
+pyarrow>=17.0,<22.0
+
+# Machine learning - classical
+scikit-learn>=1.5,<2.0
+
+# Machine learning - deep
+torch>=2.2,<3.0
+
+# Statistics
+scipy>=1.13,<2.0
+
+# Configuration loading
+PyYAML>=6.0,<7.0
+python-dotenv>=1.0,<2.0
+
+# HTTP client and HTML parsing (download_fx_data.py)
+requests>=2.32,<3.0
+beautifulsoup4>=4.12,<5.0
+
+# Test runner
+pytest>=8.2,<9.0

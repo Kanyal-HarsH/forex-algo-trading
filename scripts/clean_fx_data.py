@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
+
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
 
 import pandas as pd
 
-from config.constants import MIN_BARS_PER_DAY
-
-PROJECT_DIR = Path(__file__).resolve().parent.parent
+from config.constants import MIN_BARS_PER_DAY, PAIRS
+from scripts._common import ensure_dir, save_csv, load_pair_parquet
 
 DATA_DIR = PROJECT_DIR / "data"
 PARQUET_DIR = DATA_DIR / "parquet"
@@ -15,8 +19,6 @@ PARQUET_DIR = DATA_DIR / "parquet"
 CLEAN_ROOT_DIR = DATA_DIR / "processed"
 CLEANED_DIR = CLEAN_ROOT_DIR / "cleaned"
 CLEAN_REPORTS_DIR = CLEAN_ROOT_DIR / "reports"
-
-PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD"]
 
 CORE_COLUMNS = [
     "timestamp_est",
@@ -31,16 +33,6 @@ CORE_COLUMNS = [
     "month",
     "session",
 ]
-
-
-def ensure_dir(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def save_csv(df: pd.DataFrame, path: Path) -> None:
-    ensure_dir(path.parent)
-    df.to_csv(path, index=False)
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,22 +53,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_pair_parquet(pair: str) -> pd.DataFrame:
-    path = PARQUET_DIR / f"{pair}_2015_2025.parquet"
-    if not path.exists():
-        raise FileNotFoundError(f"Missing canonical parquet: {path}")
-
-    df = pd.read_parquet(path)
-    missing = [col for col in CORE_COLUMNS if col not in df.columns]
-    if missing:
-        raise ValueError(f"{pair}: missing required columns: {missing}")
-    if df.empty:
-        raise ValueError(f"{pair}: parquet is empty")
-
-    df = df.copy()
-    df["timestamp_est"] = pd.to_datetime(df["timestamp_est"], errors="coerce")
-    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
-    return df
+def load_canonical_pair(pair: str) -> pd.DataFrame:
+    return load_pair_parquet(
+        pair,
+        PARQUET_DIR,
+        required_columns=CORE_COLUMNS,
+        parse_est=True,
+        sort=False,
+    )
 
 
 def invalid_ohlc_mask(df: pd.DataFrame) -> pd.Series:
@@ -172,7 +156,7 @@ def process_pair(pair: str, min_obs_day: int, force: bool) -> None:
     if cleaned_path.exists() and summary_path.exists() and dropped_days_path.exists() and not force:
         return
 
-    before_df = load_pair_parquet(pair)
+    before_df = load_canonical_pair(pair)
     after_df, dropped_days_df = clean_pair(before_df, min_obs_day=min_obs_day)
     summary_df = build_cleaning_summary(
         pair=pair,

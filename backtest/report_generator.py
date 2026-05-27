@@ -4,7 +4,7 @@ import json
 import math
 import webbrowser
 from datetime import datetime, timezone
-from pathlib  import Path
+from pathlib import Path
 from typing   import List, Optional
 
 import numpy as np

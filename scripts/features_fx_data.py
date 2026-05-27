@@ -1,12 +1,31 @@
 from __future__ import annotations
 
 import argparse
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
 
 import numpy as np
 import pandas as pd
 
-from config.constants import VOL_HIGH_REGIME_PERCENTILE, VOL_REGIME_WINDOW
+from config.constants import (
+    VOL_HIGH_REGIME_PERCENTILE,
+    VOL_REGIME_WINDOW,
+    PAIRS,
+    PAIR_SPREAD_PIPS,
+    PAIR_PIP_SIZES,
+    RET_WINDOWS,
+    VOL_WINDOWS,
+    MA_WINDOWS,
+    MOM_WINDOWS,
+    RANGE_MA_WINDOWS,
+)
+from scripts._common import ensure_dir, save_csv, load_pair_parquet
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
@@ -16,8 +35,6 @@ CLEANED_DIR = CLEAN_ROOT_DIR / "cleaned"
 FEATURE_ROOT_DIR = PROJECT_DIR / "features"
 FEATURE_PAIR_DIR = FEATURE_ROOT_DIR / "pair"
 FEATURE_REPORTS_DIR = FEATURE_ROOT_DIR / "reports"
-
-PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD"]
 
 BASE_COLUMNS = [
     "timestamp_est",
@@ -33,24 +50,8 @@ BASE_COLUMNS = [
     "session",
 ]
 
-RET_WINDOWS = [1, 5, 15]
-VOL_WINDOWS = [10, 30, 60]
-MA_WINDOWS = [10, 30, 60, 120]
-MOM_WINDOWS = [5, 15, 30]
-RANGE_MA_WINDOWS = [10, 30]
-
 OVERLAP_START_HOUR = 13
 OVERLAP_END_HOUR = 16
-
-
-def ensure_dir(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def save_csv(df: pd.DataFrame, path: Path) -> None:
-    ensure_dir(path.parent)
-    df.to_csv(path, index=False)
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,21 +72,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_clean_pair(pair: str) -> pd.DataFrame:
-    """Load and validate one cleaned pair parquet."""
-    path = CLEANED_DIR / f"{pair}_2015_2025_clean.parquet"
-    if not path.exists():
-        raise FileNotFoundError(f"Missing cleaned parquet: {path}")
-
-    df = pd.read_parquet(path)
-    missing = [col for col in BASE_COLUMNS if col not in df.columns]
-    if missing:
-        raise ValueError(f"{pair}: missing required columns: {missing}")
-
-    df = df.copy()
-    df["timestamp_est"] = pd.to_datetime(df["timestamp_est"], errors="coerce")
-    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
-    df = df.sort_values("timestamp_utc").reset_index(drop=True)
-    return df
+    return load_pair_parquet(
+        pair,
+        CLEANED_DIR,
+        suffix="clean",
+        required_columns=BASE_COLUMNS,
+        parse_est=True,
+    )
 
 
 def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -95,6 +88,24 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     out["is_overlap_session"] = (
         (out["hour"] >= OVERLAP_START_HOUR) & (out["hour"] < OVERLAP_END_HOUR)
     ).astype("int8")
+    return out
+
+
+def add_f1_extended(df: pd.DataFrame) -> pd.DataFrame:
+    """F1 extensions: cyclical time, session one-hot, month-end flag.
+
+    Requires 'hour' (from add_time_features) and 'session' (from cleaned data).
+    Session column values expected: 'Asia', 'London', 'Overlap', 'New_York'.
+    """
+    out = df.copy()
+    out["minute_of_day"] = out["timestamp_utc"].dt.hour * 60 + out["timestamp_utc"].dt.minute
+    out["hour_sin"] = np.sin(2 * np.pi * out["hour"] / 24)
+    out["hour_cos"] = np.cos(2 * np.pi * out["hour"] / 24)
+    out["session_asia"]    = (out["session"] == "Asia").astype("int8")
+    out["session_london"]  = (out["session"] == "London").astype("int8")
+    out["session_overlap"] = (out["session"] == "Overlap").astype("int8")
+    out["session_ny"]      = (out["session"] == "New_York").astype("int8")
+    out["is_month_end"]    = out["timestamp_utc"].dt.is_month_end.astype("int8")
     return out
 
 
@@ -141,6 +152,64 @@ def add_trend_features(df: pd.DataFrame) -> pd.DataFrame:
 
     for window in MOM_WINDOWS:
         out[f"mom_{window}"] = out["close"] / out["close"].shift(window) - 1.0
+
+    return out
+
+
+def add_f3_extended(df: pd.DataFrame) -> pd.DataFrame:
+    """F3 extension: same-minute previous-day log bar range.
+
+    Groups bars by clock time (HH:MM) and shifts within each group by 1 day.
+    Handles missing bars (weekend/holiday gaps) correctly - only shifts within
+    the same time-of-day group, not by a fixed 1440-bar offset.
+    First occurrence of each HH:MM group will be NaN; fill with 0 at training time.
+    """
+    out = df.copy()
+    bar_logrange = np.log(out["high"] / out["low"]).replace([np.inf, -np.inf], np.nan)
+    time_key = out["timestamp_utc"].dt.strftime("%H:%M")
+    out["same_minute_prev_day_logrange"] = (
+        bar_logrange.groupby(time_key).shift(1).values
+    )
+    return out
+
+
+def add_f5_extended(df: pd.DataFrame) -> pd.DataFrame:
+    """F5 extension: RSI-14 using Wilder EWM (matches RSIMeanReversion._rsi formula)."""
+    out = df.copy()
+    period = 14
+    delta = out["close"].diff()
+    avg_gain = delta.clip(lower=0).ewm(alpha=1.0 / period, adjust=False).mean()
+    avg_loss = (-delta.clip(upper=0)).ewm(alpha=1.0 / period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    out["rsi_14"] = 100.0 - (100.0 / (1.0 + rs))
+    return out
+
+
+def add_spread_features(df: pd.DataFrame, pair: str) -> pd.DataFrame:
+    """F6: spread / liquidity proxies.
+
+    histdata's feed has no real bid/ask spread, so we use a fixed per-pair
+    spread from PAIR_SPREAD_PIPS plus bar-shape proxies for liquidity.
+    """
+    out = df.copy()
+
+    pip_size  = PAIR_PIP_SIZES.get(pair, 0.0001)
+    spread_pp = PAIR_SPREAD_PIPS.get(pair, 1.0)
+
+    out["spread_pips"] = spread_pp
+    out["bar_range_pips"] = (out["high"] - out["low"]) / pip_size
+    out["bar_range_to_spread_ratio"] = np.where(
+        spread_pp != 0, out["bar_range_pips"] / spread_pp, np.nan
+    )
+
+    if "volume" in out.columns:
+        vol_mean = out["volume"].rolling(window=60, min_periods=60).mean()
+        vol_std  = out["volume"].rolling(window=60, min_periods=60).std()
+        out["volume_zscore_60"] = np.where(
+            vol_std != 0, (out["volume"] - vol_mean) / vol_std, np.nan
+        )
+    else:
+        out["volume_zscore_60"] = np.nan
 
     return out
 
@@ -219,11 +288,15 @@ def build_pair_features(
     out = df.copy()
 
     out = add_time_features(out)
+    out = add_f1_extended(out)
     out = add_return_features(out)
     out = add_range_features(out)
     out = add_volatility_features(out)
+    out = add_f3_extended(out)
     out = add_trend_features(out)
+    out = add_f5_extended(out)
     out = add_volatility_regime_features(out)
+    out = add_spread_features(out, pair)
     out = add_cross_pair_features(pair, out, cross_maps)
 
     before_drop = len(out)
@@ -236,6 +309,10 @@ def build_pair_features(
             "mom_5", "mom_15", "mom_30",
             "range_ma_10", "range_ma_30",
             "volatility_regime_high",
+            "hour_sin", "hour_cos",
+            "session_asia", "session_london", "session_ny", "session_overlap",
+            "rsi_14",
+            # same_minute_prev_day_logrange excluded - NaN for first ~1440 bars per pair
         ]
         out = out.dropna(subset=required_feature_cols).reset_index(drop=True)
 
@@ -255,8 +332,11 @@ def process_pair(
     summary_path = report_dir / "feature_summary.csv"
 
     if output_path.exists() and summary_path.exists() and not force:
+        print(f"  [SKIP] {pair}: already exists (use --force to recompute)")
         return
 
+    t0 = time.time()
+    print(f"  [START] {pair} ...")
     feature_df, summary_df = build_pair_features(
         pair=pair,
         df=cleaned_frames[pair],
@@ -267,6 +347,8 @@ def process_pair(
     ensure_dir(FEATURE_PAIR_DIR)
     feature_df.to_parquet(output_path, index=False)
     save_csv(summary_df, summary_path)
+    elapsed = time.time() - t0
+    print(f"  [DONE]  {pair}: {len(feature_df):,} rows, {len(feature_df.columns)} cols - {elapsed:.1f}s")
 
 
 def main() -> None:
@@ -275,19 +357,34 @@ def main() -> None:
     ensure_dir(FEATURE_PAIR_DIR)
     ensure_dir(FEATURE_REPORTS_DIR)
 
+    print(f"Loading cleaned parquets for {len(PAIRS)} pairs ...")
+    t_load = time.time()
     cleaned_frames = {pair: load_clean_pair(pair) for pair in PAIRS}
+    print(f"Loaded in {time.time() - t_load:.1f}s. Building cross-pair return maps ...")
     cross_maps = build_cross_pair_return_map(cleaned_frames)
+    print(f"Cross-pair maps ready. Processing {len(PAIRS)} pairs in parallel ...\n")
 
-    for pair in PAIRS:
-        process_pair(
-            pair=pair,
-            cleaned_frames=cleaned_frames,
-            cross_maps=cross_maps,
-            drop_warmup=args.drop_warmup,
-            force=args.force,
-        )
+    t_start = time.time()
+    with ThreadPoolExecutor(max_workers=len(PAIRS)) as pool:
+        futures = {
+            pool.submit(
+                process_pair,
+                pair=pair,
+                cleaned_frames=cleaned_frames,
+                cross_maps=cross_maps,
+                drop_warmup=args.drop_warmup,
+                force=args.force,
+            ): pair
+            for pair in PAIRS
+        }
+        for fut in as_completed(futures):
+            pair = futures[fut]
+            exc = fut.exception()
+            if exc:
+                print(f"  [ERROR] {pair}: {exc}")
 
-    print("Feature engineering complete.")
+    total = time.time() - t_start
+    print(f"\nFeature engineering complete in {total:.1f}s.")
     print(f"Processed pairs: {', '.join(PAIRS)}")
     print(f"Feature datasets saved in: {FEATURE_PAIR_DIR}")
     print(f"Feature reports saved in: {FEATURE_REPORTS_DIR}")

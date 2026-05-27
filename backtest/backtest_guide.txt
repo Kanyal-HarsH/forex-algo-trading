@@ -1,0 +1,32 @@
+══════════════════════════════════════════════════════════
+  DATA PIPELINE COMPLETE — READY FOR BACKTEST
+══════════════════════════════════════════════════════════
+
+EXAMPLE COMMANDS
+─────────────────
+# Single pair, single strategy, validation split
+python -m cli.run --pairs EURUSD --strategies MACrossover_f20_s50_EMA --split val --no-browser
+
+# Multiple pairs and strategies
+python -m cli.run --pairs EURUSD GBPUSD --strategies MACrossover_f20_s50_EMA MACD_f12_s26_sig9 --split test
+
+# All pairs and strategies
+python -m cli.run --pairs all --strategies all --split train --no-browser
+
+# With take-profit and stop-loss
+python -m cli.run --pairs AUDUSD --strategies Donchian_p20 --split val --tp-pips 20 --sl-pips 10
+
+# Custom spread and output path
+python -m cli.run --pairs USDJPY --strategies MACrossover_f10_s30_EMA --split val --spread-override 1.5 --out reports/my_run.html --no-browser
+
+FLAG REFERENCE
+──────────────
+--pairs           FX pair symbols (e.g. EURUSD GBPUSD) or 'all'
+--strategies      Strategy names (e.g. MACrossover_f20_s50_EMA) or 'all'
+--split           train | val | test
+--folds           Walk-forward CV folds, e.g. 5  [optional]
+--tp-pips         Take-profit in pips, e.g. 15   [optional]
+--sl-pips         Stop-loss in pips, e.g. 10     [optional]
+--spread-override Override default spread in pips [optional]
+--out             Custom path for the HTML report  [optional]
+--no-browser      Save report only, don't open browser

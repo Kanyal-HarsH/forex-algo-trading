@@ -5,23 +5,25 @@ import re
 import sys
 from pathlib import Path
 
-import numpy  as np
+import numpy as np
 import pandas as pd
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_DIR))
 
-from backtest.engine         import PAIRS, run_backtest, run_wf_folds
+from backtest.engine         import run_backtest, run_wf_folds
 from backtest.report_generator import generate_report
 from backtest.strategies     import STRATEGY_REGISTRY, get_strategy
+from config.constants import (
+    PAIRS,
+    CLEANED_DIR,
+    TRAIN_DIR,
+    VAL_DIR,
+    TEST_DIR,
+    fold_parquet_path,
+)
 
-SPLIT_ROOT_DIR = PROJECT_DIR / "datasets"
-CLEANED_DIR    = PROJECT_DIR / "data" / "processed" / "cleaned"
-TRAIN_DIR      = SPLIT_ROOT_DIR / "train"
-VAL_DIR        = SPLIT_ROOT_DIR / "val"
-TEST_DIR       = SPLIT_ROOT_DIR / "test"
-
-ALL_PAIRS      = PAIRS
+ALL_PAIRS      = list(PAIRS)
 ALL_STRATEGIES = list(STRATEGY_REGISTRY.keys())
 
 NAMED_SPLITS = ["full", "train", "val", "test"] + [f"fold_{i}" for i in range(5)]
@@ -42,27 +44,18 @@ CYAN   = "\033[96m" if _TTY else ""
 RESET  = "\033[0m"  if _TTY else ""
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Run FX backtests and generate an HTML report.",
-        formatter_class=argparse.RawTextHelpFormatter,
-    )
-
-    parser.add_argument(
-        "--pair", nargs="+", default=["all"],
-        metavar="PAIR",
+def _split_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(add_help=False, formatter_class=argparse.RawTextHelpFormatter)
+    p.add_argument(
+        "--pair", nargs="+", default=["all"], metavar="PAIR",
         help="One or more pairs, or 'all'.\nExample: --pair EURUSD GBPUSD",
     )
-    parser.add_argument(
-        "--strategy", nargs="+", default=["all"],
-        metavar="STRATEGY",
+    p.add_argument(
+        "--strategy", nargs="+", default=["all"], metavar="STRATEGY",
         help="One or more strategy names, or 'all'.\nExample: --strategy MACrossover_f20_s50_EMA",
     )
-    parser.add_argument(
-        "--split",
-        choices=NAMED_SPLITS,
-        default="full",
-        metavar="SPLIT",
+    p.add_argument(
+        "--split", choices=NAMED_SPLITS, default="full", metavar="SPLIT",
         help=(
             "Data split to run on.\n"
             "  full   -- entire cleaned history (DEFAULT)\n"
@@ -70,89 +63,82 @@ def parse_args() -> argparse.Namespace:
             "  train  -- training partition\n"
             "  val    -- validation partition\n"
             "  test   -- held-out test partition\n"
-            "  fold_N -- walk-forward fold N (0-4) within the train partition\n"
+            "  fold_N -- walk-forward fold N (0-4), reads from datasets/folds/fold_N/\n"
             "\n"
             "Rule-based strategies have no fittable parameters so 'full' is always correct.\n"
             "Use train/val/test only when evaluating ML-based strategies."
         ),
     )
-    parser.add_argument(
-        "--from", dest="date_from",
-        type=str, default=None,
-        metavar="DATETIME",
+    p.add_argument(
+        "--from", dest="date_from", type=str, default=None, metavar="DATETIME",
         help=(
             "Start of the analysis window (inclusive).\n"
             "Accepts ISO 8601: '2022-01-01' or '2022-01-01T00:00:00'.\n"
             "Applied AFTER loading the split parquet."
         ),
     )
-    parser.add_argument(
-        "--to", dest="date_to",
-        type=str, default=None,
-        metavar="DATETIME",
+    p.add_argument(
+        "--to", dest="date_to", type=str, default=None, metavar="DATETIME",
         help=(
             "End of the analysis window (inclusive).\n"
             "Accepts ISO 8601: '2022-12-31' or '2022-12-31T23:59:00'."
         ),
     )
-    parser.add_argument(
-        "--folds", type=int, default=0,
-        metavar="FOLDS",
+    p.add_argument(
+        "--folds", type=int, default=0, metavar="FOLDS",
         help="Walk-forward folds (uses train split). 0 = single full-period run.",
     )
-    parser.add_argument(
-        "--capital", type=float, default=10_000.0,
-        metavar="CAPITAL",
+    return p
+
+
+def _cost_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(add_help=False, formatter_class=argparse.RawTextHelpFormatter)
+    p.add_argument(
+        "--capital", type=float, default=10_000.0, metavar="CAPITAL",
         help="Starting capital in USD. Default: 10000.",
     )
-    parser.add_argument(
-        "--spread", type=float, default=None,
-        metavar="SPREAD",
+    p.add_argument(
+        "--spread", type=float, default=None, metavar="SPREAD",
         help="Override spread in pips for all pairs. Uses per-pair table if omitted.",
     )
-    parser.add_argument(
-        "--tp-pips", type=float, default=None,
-        metavar="TP_PIPS",
+    p.add_argument(
+        "--tp-pips", type=float, default=None, metavar="TP_PIPS",
         help="Take-profit distance in pips.",
     )
-    parser.add_argument(
-        "--sl-pips", type=float, default=None,
-        metavar="SL_PIPS",
+    p.add_argument(
+        "--sl-pips", type=float, default=None, metavar="SL_PIPS",
         help="Stop-loss distance in pips.",
     )
-    parser.add_argument(
-        "--max-hold", type=int, default=None,
-        metavar="BARS",
+    p.add_argument(
+        "--max-hold", type=int, default=None, metavar="BARS",
         help=(
             "Maximum bars to hold a position.\n"
             "With 1-min data: 60 = 1 h, 240 = 4 h."
         ),
     )
-    parser.add_argument(
-        "--session",
-        choices=list(_SESSION_HOURS.keys()),
-        default=None,
-        metavar="SESSION",
+    return p
+
+
+def _filter_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(add_help=False, formatter_class=argparse.RawTextHelpFormatter)
+    p.add_argument(
+        "--session", choices=list(_SESSION_HOURS.keys()), default=None, metavar="SESSION",
         help=(
             "Only enter trades inside this session window (UTC).\n"
             "london 07-16  |  ny 13-22  |  asia 23-08  |  overlap 13-16"
         ),
     )
-    parser.add_argument(
-        "--entry-time", type=str, default=None,
-        metavar="HH:MM",
+    p.add_argument(
+        "--entry-time", type=str, default=None, metavar="HH:MM",
         help="Only enter trades at or after this UTC time each day. Example: 09:00",
     )
-    parser.add_argument(
-        "--resample", type=str, default=None,
-        metavar="FREQ",
+    p.add_argument(
+        "--resample", type=str, default=None, metavar="FREQ",
         help="Resample bars before running. Any pandas offset string: 1H 4H 15min 1D.",
     )
-    parser.add_argument(
-        "--direction",
-        choices=["long_short", "long_only", "short_only"],
-        default="long_short",
-        metavar="MODE",
+    p.add_argument(
+        "--direction", choices=["long_short", "long_only", "short_only"],
+        default="long_short", metavar="MODE",
         help=(
             "Which signal directions to trade.\n"
             "long_short -- both longs and shorts (default)\n"
@@ -160,12 +146,13 @@ def parse_args() -> argparse.Namespace:
             "short_only -- suppress long  (+1) signals"
         ),
     )
+    return p
 
-    parser.add_argument(
-        "--mode",
-        choices=["research", "simulation"],
-        default=None,
-        metavar="MODE",
+
+def _output_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(add_help=False, formatter_class=argparse.RawTextHelpFormatter)
+    p.add_argument(
+        "--mode", choices=["research", "simulation"], default=None, metavar="MODE",
         help=(
             "Override the run mode label written to the HTML report.\n"
             "If omitted, inferred automatically:\n"
@@ -173,17 +160,23 @@ def parse_args() -> argparse.Namespace:
             "  research   -- otherwise"
         ),
     )
-
-    parser.add_argument(
-        "--out", type=Path, default=None,
-        metavar="OUTPUT_PATH",
+    p.add_argument(
+        "--out", type=Path, default=None, metavar="OUTPUT_PATH",
         help="Custom output .html path. Auto-named if omitted.",
     )
-    parser.add_argument(
+    p.add_argument(
         "--no-browser", action="store_true",
         help="Write report without opening it in the browser.",
     )
+    return p
 
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run FX backtests and generate an HTML report.",
+        formatter_class=argparse.RawTextHelpFormatter,
+        parents=[_split_parser(), _cost_parser(), _filter_parser(), _output_parser()],
+    )
     return parser.parse_args()
 
 
@@ -196,22 +189,41 @@ def resolve_pairs(raw: list[str]) -> list[str]:
     return raw
 
 
+_ML_STRATEGY_NAMES = {
+    f"{m}_{s}"
+    for m in ("LR", "LSTM")
+    for s in ("global", "london", "ny", "asia")
+}
+
+
 def resolve_strategies(raw: list[str]) -> list[str]:
     if raw == ["all"]:
         return ALL_STRATEGIES
-    invalid = [s for s in raw if s not in STRATEGY_REGISTRY]
+    invalid = [s for s in raw if s not in STRATEGY_REGISTRY and s not in _ML_STRATEGY_NAMES]
     if invalid:
         raise ValueError(
-            f"Unknown strategies: {invalid}.\nAvailable: {ALL_STRATEGIES}"
+            f"Unknown strategies: {invalid}.\n"
+            f"Rule-based: {ALL_STRATEGIES}\n"
+            f"ML: {sorted(_ML_STRATEGY_NAMES)}"
         )
     return raw
 
 
 def resolve_split_path(split: str, pair: str) -> Path:
+    """Return the parquet path for a given split name and currency pair.
+
+    fold_N splits are resolved to datasets/folds/fold_N/{pair}_train.parquet
+    - the year-aligned, purge-gapped files written by scripts/split_fx_data.py.
+    This ensures walk-forward evaluation uses proper calendar boundaries and no
+    label leakage, rather than a raw index-slice of the monolithic train parquet.
+    """
     if split == "full":
         return CLEANED_DIR / f"{pair}_2015_2025_clean.parquet"
-    if split == "train" or split.startswith("fold_"):
+    if split == "train":
         return TRAIN_DIR / f"{pair}_train.parquet"
+    if split.startswith("fold_"):
+        fold_idx = int(split.split("_")[1])
+        return fold_parquet_path(pair, fold_idx, "train")
     if split == "val":
         return VAL_DIR   / f"{pair}_val.parquet"
     if split == "test":
@@ -227,24 +239,23 @@ def load_split_data(
 ) -> pd.DataFrame:
     path = resolve_split_path(split, pair)
     if not path.exists():
-        hint = (
-            "Run scripts/clean_fx_data.py first to generate data/processed/cleaned/ parquets."
-            if split == "full"
-            else "Run scripts/split_fx_data.py first to generate datasets/train|val|test/ parquets."
-        )
+        if split.startswith("fold_"):
+            hint = (
+                f"Run scripts/split_fx_data.py --force-folds to generate "
+                f"datasets/folds/ parquets."
+            )
+        elif split == "full":
+            hint = "Run scripts/clean_fx_data.py first to generate data/processed/cleaned/ parquets."
+        else:
+            hint = "Run scripts/split_fx_data.py first to generate datasets/train|val|test/ parquets."
         raise FileNotFoundError(f"Parquet not found: {path}\n{hint}")
 
     df = pd.read_parquet(path)
     df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True)
     df = df.sort_values("timestamp_utc").reset_index(drop=True)
 
-    if split.startswith("fold_"):
-        fold_idx = int(split.split("_")[1])
-        n_folds  = 5
-        fold_sz  = len(df) // n_folds
-        start    = fold_idx * fold_sz
-        end      = start + fold_sz if fold_idx < n_folds - 1 else len(df)
-        df = df.iloc[start:end].reset_index(drop=True)
+    # NOTE: no index-slicing for fold_N - the fold parquet already contains
+    # only the correct year-aligned, purge-gapped rows for that fold.
 
     actual_start = df["timestamp_utc"].iloc[0].strftime("%Y-%m-%d")
     actual_end   = df["timestamp_utc"].iloc[-1].strftime("%Y-%m-%d")
@@ -376,13 +387,32 @@ def print_summary(results: list) -> None:
     print()
 
 
+def _preflight_fold_paths(pairs: list[str], n_folds: int) -> None:
+    """Fail fast if any (pair, k) fold parquet is missing before launching backtests."""
+    missing = []
+    for pair in pairs:
+        for k in range(n_folds):
+            p = fold_parquet_path(pair, k, "train")
+            if not p.exists():
+                missing.append(str(p))
+    if missing:
+        msg = "\n  ".join(missing)
+        raise FileNotFoundError(
+            f"Pre-flight check failed: {len(missing)} fold parquet(s) missing:\n  {msg}\n"
+            f"Run scripts/split_fx_data.py --force-folds to generate them."
+        )
+
+
 def main() -> None:
     args       = parse_args()
     pairs      = resolve_pairs(args.pair)
     strategies = resolve_strategies(args.strategy)
     total_runs = len(pairs) * len(strategies)
 
-    # ── FIX 1 (P4) ── mode inferred from --from, not from capital
+    if args.folds > 0:
+        _preflight_fold_paths(pairs, args.folds)
+
+    # mode inferred from --from, not from capital
     if args.mode is not None:
         mode = args.mode
     else:
@@ -435,7 +465,7 @@ def main() -> None:
             )
 
             for strat_name in strategies:
-                strat   = get_strategy(strat_name)
+                strat   = get_strategy(strat_name, pair=pair)
                 signals = strat.generate_signals(
                     df_split.reset_index(drop=True)
                 ).reset_index(drop=True)

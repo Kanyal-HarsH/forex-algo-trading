@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
+
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
 
 import pandas as pd
 
-from config.constants import HORIZON_PRIMARY, HORIZON_SECONDARY
-
-PROJECT_DIR = Path(__file__).resolve().parent.parent
+from config.constants import HORIZON_PRIMARY, HORIZON_SECONDARY, PAIRS
+from scripts._common import ensure_dir, save_csv, load_pair_parquet
 
 FEATURE_ROOT_DIR = PROJECT_DIR / "features"
 FEATURE_PAIR_DIR = FEATURE_ROOT_DIR / "pair"
@@ -15,8 +19,6 @@ FEATURE_PAIR_DIR = FEATURE_ROOT_DIR / "pair"
 LABEL_ROOT_DIR = PROJECT_DIR / "labels"
 LABEL_PAIR_DIR = LABEL_ROOT_DIR / "pair"
 LABEL_REPORTS_DIR = LABEL_ROOT_DIR / "reports"
-
-PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD"]
 
 REQUIRED_COLUMNS = [
     "timestamp_utc",
@@ -27,16 +29,6 @@ REQUIRED_COLUMNS = [
 
 DEFAULT_THRESHOLD_PRIMARY = 0.0005
 DEFAULT_THRESHOLD_SECONDARY = 0.0010
-
-
-def ensure_dir(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def save_csv(df: pd.DataFrame, path: Path) -> None:
-    ensure_dir(path.parent)
-    df.to_csv(path, index=False)
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,22 +73,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_feature_pair(pair: str) -> pd.DataFrame:
-    """Load and validate one feature-engineered pair parquet."""
-    path = FEATURE_PAIR_DIR / f"{pair}_2015_2025_features.parquet"
-    if not path.exists():
-        raise FileNotFoundError(f"Missing feature parquet: {path}")
-
-    df = pd.read_parquet(path)
-    missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
-    if missing:
-        raise ValueError(f"{pair}: missing required columns: {missing}")
-    if df.empty:
-        raise ValueError(f"{pair}: feature parquet is empty")
-
-    df = df.copy()
-    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
-    df = df.sort_values("timestamp_utc").reset_index(drop=True)
-    return df
+    return load_pair_parquet(
+        pair,
+        FEATURE_PAIR_DIR,
+        suffix="features",
+        required_columns=REQUIRED_COLUMNS,
+    )
 
 
 def compute_future_return(df: pd.DataFrame, horizon: int) -> pd.Series:
